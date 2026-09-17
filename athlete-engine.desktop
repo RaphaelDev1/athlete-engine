@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Athlete Engine
+Comment=Lance l'application Athlete Engine (Next.js + Prisma)
+Exec=x-terminal-emulator -e "/home/USER/athlete-engine/lancer-app.sh"
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;

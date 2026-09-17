@@ -1,0 +1,601 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User ────────────────────────────────────────────────────────────────────
+// Simplifié en V1 — mono-utilisateur
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  profile             AthleteProfile?
+  goals               Goal[]
+  plans               TrainingPlan[]
+  nutrition           NutritionDay[]
+  garminData          GarminData[]
+  checkIns            DailyCheckIn[]
+  weightLogs          WeightLog[]
+  notifications       Notification[]
+  trainingSchedule    TrainingSchedule?
+  planAdaptationState PlanAdaptationState?
+  activities          Activity[]
+  scheduleDayChoices  ScheduleDayChoice[]
+  workSchedule        WorkSchedule?
+
+  // Statut de la synchronisation Garmin (login + polling non-officiel)
+  garminLastSyncAt     DateTime? @map("garmin_last_sync_at")
+  garminLastSyncStatus String?   @map("garmin_last_sync_status") // "ok" | "error"
+  garminLastSyncError  String?   @map("garmin_last_sync_error")
+
+  // Statut de la synchronisation Intervals.icu (activités réelles)
+  intervalsLastSyncAt     DateTime? @map("intervals_last_sync_at")
+  intervalsLastSyncStatus String?   @map("intervals_last_sync_status") // "ok" | "error"
+  intervalsLastSyncError  String?   @map("intervals_last_sync_error")
+
+  @@map("users")
+}
+
+// ─── AthleteProfile ──────────────────────────────────────────────────────────
+model AthleteProfile {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Biométrie
+  height      Float? // cm
+  weight      Float? // kg
+  dateOfBirth DateTime? @map("date_of_birth")
+  sex         Sex?
+  bodyFatPct  Float?    @map("body_fat_pct") // %
+
+  // Cardio
+  restingHR Int? @map("resting_hr") // bpm
+  maxHR     Int? @map("max_hr") // bpm
+
+  // Course
+  vo2max        Float? @map("vo2max")
+  thresholdPace Float? @map("threshold_pace") // sec/km
+  weeklyVolume  Float? @map("weekly_volume") // km/semaine
+
+  // Musculation
+  experienceLevel ExperienceLevel? @map("experience_level")
+  weeklyFrequency Int?             @map("weekly_frequency") // séances/semaine
+
+  // Vélo
+  ftp              Int? // watts
+  wattsPerKg       Float? @map("watts_per_kg")
+  preferredCadence Int?   @map("preferred_cadence") // RPM
+
+  // Natation
+  swimPace100m     Float? @map("swim_pace_100m") // sec/100m
+  weeklySwimVolume Float? @map("weekly_swim_volume") // km/semaine
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  personalRecords PersonalRecord[]
+
+  @@map("athlete_profiles")
+}
+
+enum Sex {
+  MALE
+  FEMALE
+}
+
+enum ExperienceLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+// ─── PersonalRecord ──────────────────────────────────────────────────────────
+model PersonalRecord {
+  id        String         @id @default(cuid())
+  profileId String         @map("profile_id")
+  profile   AthleteProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+
+  discipline Discipline
+  exercise   String // "5K", "10K", "squat", "bench", etc.
+  value      Float // secondes (course) ou kg (muscu) ou watts (vélo)
+  unit       String // "seconds", "kg", "watts"
+  achievedAt DateTime?  @map("achieved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("personal_records")
+}
+
+enum Discipline {
+  RUNNING
+  STRENGTH
+  CYCLING
+  SWIMMING
+}
+
+// ─── Goal ────────────────────────────────────────────────────────────────────
+model Goal {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type        GoalType
+  title       String
+  description String?
+  targetValue Float?       @map("target_value") // valeur cible (temps, kg, etc.)
+  targetUnit  String?      @map("target_unit") // "seconds", "kg", "km", etc.
+  deadline    DateTime?
+  priority    GoalPriority @default(SECONDARY)
+  status      GoalStatus   @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  plans TrainingPlan[]
+
+  @@map("goals")
+}
+
+enum GoalType {
+  RUNNING // "Courir un semi en 1h30"
+  STRENGTH // "Squat à 140kg"
+  COMPOSITION // "Passer de 82 à 76kg"
+  MIXED // "Triathlon sprint + force"
+  FREE // "Améliorer VO2max"
+}
+
+enum GoalPriority {
+  PRIMARY
+  SECONDARY
+  MAINTENANCE
+}
+
+enum GoalStatus {
+  ACTIVE
+  COMPLETED
+  PAUSED
+  CANCELLED
+}
+
+// ─── TrainingSchedule ────────────────────────────────────────────────────────
+// Paramètres du plan généré à la volée (lib/engine/periodization.ts) + compteur
+// de report cumulatif. Le plan lui-même (semaines/séances) n'est jamais
+// persisté : seul ce point d'ancrage l'est, pour survivre au rechargement et
+// permettre le report en cascade ("Reporter" décale shiftDays de +1, ce qui
+// glisse toute la préparation restante d'un jour).
+model TrainingSchedule {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  goalType     PlanGoalType @default(TRIATHLON) @map("goal_type")
+  totalWeeks   Int          @default(26) @map("total_weeks")
+  startDate    DateTime     @map("start_date")
+  raceDate     DateTime?    @map("race_date")
+  vacationMode Boolean      @default(false) @map("vacation_mode")
+  shiftDays    Int          @default(0) @map("shift_days")
+
+  // Disponibilités (Phase 1) : jours où l'athlète peut s'entraîner (0=lundi..6=dimanche)
+  // et budget de temps hebdomadaire optionnel — le générateur (lib/engine/periodization.ts)
+  // remappe les séances sur ces jours et réduit la durée si besoin.
+  availableDays       Int[] @default([0, 1, 2, 3, 4, 5, 6]) @map("available_days")
+  weeklyTimeBudgetMin Int?  @map("weekly_time_budget_min")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("training_schedules")
+}
+
+enum PlanGoalType {
+  RUNNING
+  STRENGTH
+  MIXED
+  TRIATHLON
+}
+
+// ─── ScheduleDayChoice ───────────────────────────────────────────────────────
+// Surcharge, date par date, du pattern hebdomadaire de TrainingSchedule.availableDays
+// — alimente le calendrier 2 semaines de /training (lib/training/dayPlanner.ts).
+// Une date sans entrée ici suit le pattern hebdo par défaut.
+model ScheduleDayChoice {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  date      DateTime @db.Date
+  available Boolean
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, date])
+  @@map("schedule_day_choices")
+}
+
+// ─── WorkSchedule ────────────────────────────────────────────────────────────
+// Cycle de travail répétitif (ex. rythme de nuit 2 semaines) déclaré une fois
+// par l'athlète — lib/training/workSchedule.ts projette ce cycle sur le
+// calendrier réel (anchorDate = date calendaire du jour 0 du cycle) pour
+// savoir, pour n'importe quelle date, si c'est un jour travaillé (donc
+// plafonné à 1 séance, sommeil décalé) ou un jour de repos, et alimente
+// lib/training/schedule.ts::resolveDayAvailability + lib/training/dayPlanner.ts.
+model WorkSchedule {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  anchorDate DateTime @map("anchor_date") @db.Date
+
+  // 14 entrées (index 0 = anchorDate, puis +1 jour par index, cycle
+  // répété indéfiniment) : { isWorkDay: boolean, startMin: number|null,
+  // endMin: number|null } — startMin/endMin en minutes depuis minuit,
+  // null si repos. Stocké en JSON plutôt qu'une table enfant : taille fixe,
+  // toujours lu/écrit d'un bloc, jamais interrogé séance par entrée.
+  pattern Json @default("[]")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("work_schedules")
+}
+
+// ─── PlanAdaptationState ─────────────────────────────────────────────────────
+// État persistant de la boucle d'adaptation progressive (Phase 3) : ajusté par
+// lib/engine/weekReview.ts à chaque revue de semaine, consommé par
+// lib/training/materialize.ts pour moduler le profil avant régénération des
+// semaines futures. `history` journalise chaque ajustement (raison, delta, date).
+model PlanAdaptationState {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  volumeMultiplier    Float     @default(1) @map("volume_multiplier")
+  intensityMultiplier Float     @default(1) @map("intensity_multiplier")
+  lastReviewedWeekEnd DateTime? @map("last_reviewed_week_end")
+  history             Json      @default("[]")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("plan_adaptation_states")
+}
+
+// ─── TrainingPlan ────────────────────────────────────────────────────────────
+model TrainingPlan {
+  id     String  @id @default(cuid())
+  userId String  @map("user_id")
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  goalId String? @map("goal_id")
+  goal   Goal?   @relation(fields: [goalId], references: [id], onDelete: SetNull)
+
+  name      String
+  startDate DateTime   @map("start_date")
+  endDate   DateTime   @map("end_date")
+  status    PlanStatus @default(ACTIVE)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  weeks TrainingWeek[]
+
+  @@map("training_plans")
+}
+
+enum PlanStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+// ─── TrainingWeek ────────────────────────────────────────────────────────────
+model TrainingWeek {
+  id     String       @id @default(cuid())
+  planId String       @map("plan_id")
+  plan   TrainingPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+
+  weekNumber   Int      @map("week_number")
+  weekType     WeekType @default(LOAD) @map("week_type")
+  targetVolume Float?   @map("target_volume") // km ou minutes
+  startDate    DateTime @map("start_date")
+  endDate      DateTime @map("end_date")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sessions TrainingSession[]
+
+  @@map("training_weeks")
+}
+
+enum WeekType {
+  LOAD
+  DELOAD
+  TAPER
+  RECOVERY
+  TEST
+}
+
+// ─── TrainingSession ─────────────────────────────────────────────────────────
+model TrainingSession {
+  id     String       @id @default(cuid())
+  weekId String       @map("week_id")
+  week   TrainingWeek @relation(fields: [weekId], references: [id], onDelete: Cascade)
+
+  sport          Sport
+  sessionType    SessionType @map("session_type")
+  title          String
+  description    String?
+  scheduledDate  DateTime    @map("scheduled_date")
+  scheduledTime  String?     @map("scheduled_time") // "08:00"
+  duration       Int? // minutes prévues
+  actualDuration Int?        @map("actual_duration") // minutes réelles
+
+  // Course
+  targetDistance Float? @map("target_distance") // km
+  targetPace     Float? @map("target_pace") // sec/km
+  targetZone     Int?   @map("target_zone") // 1-5
+
+  // Intensité
+  targetRPE Float? @map("target_rpe") // 1-10
+  actualRPE Float? @map("actual_rpe")
+
+  status    SessionStatus @default(PLANNED)
+  notes     String?
+  // Déroulé de la séance tel que généré (échauffement/corps/retour au calme) —
+  // un instantané au moment de la matérialisation (lib/training/materialize.ts),
+  // jamais régénéré après coup pour ne pas contredire une séance déjà loggée.
+  structure Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  exercises Exercise[]
+
+  @@map("training_sessions")
+}
+
+enum Sport {
+  RUNNING
+  STRENGTH
+  CYCLING
+  SWIMMING
+  REST
+  MOBILITY
+}
+
+enum SessionType {
+  LONG_RUN
+  TEMPO
+  INTERVALS
+  RECOVERY_RUN
+  FARTLEK
+  HILLS
+  EASY_RUN
+  RACE
+  FULL_BODY
+  UPPER_BODY
+  LOWER_BODY
+  PUSH
+  PULL
+  LEGS
+  ENDURANCE_RIDE
+  TEMPO_RIDE
+  INTERVAL_RIDE
+  SWIM_TECHNIQUE
+  SWIM_ENDURANCE
+  SWIM_RACE_PACE
+  OPEN_WATER
+  BRICK
+  FITNESS_TEST
+  HOME_CIRCUIT
+  REST_DAY
+  MOBILITY_SESSION
+  CUSTOM
+}
+
+enum SessionStatus {
+  PLANNED
+  COMPLETED
+  PARTIAL
+  SKIPPED
+  RESCHEDULED
+}
+
+// ─── Exercise ────────────────────────────────────────────────────────────────
+model Exercise {
+  id        String          @id @default(cuid())
+  sessionId String          @map("session_id")
+  session   TrainingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  name        String
+  orderIndex  Int     @map("order_index")
+  sets        Int?
+  reps        String? // ex. "6-8", "12-15", "45s" (plage ou durée, jamais un nombre fixe)
+  weight      Float? // kg
+  targetRPE   Float?  @map("target_rpe")
+  restSeconds Int?    @map("rest_seconds")
+  notes       String?
+
+  // Résultats réels
+  actualSets   Int?   @map("actual_sets")
+  actualReps   Int?   @map("actual_reps")
+  actualWeight Float? @map("actual_weight")
+  actualRPE    Float? @map("actual_rpe")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("exercises")
+}
+
+// ─── NutritionDay ────────────────────────────────────────────────────────────
+model NutritionDay {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  date DateTime @db.Date
+
+  bmr      Float // kcal
+  tdee     Float // kcal
+  protein  Float // grammes
+  carbs    Float // grammes
+  fat      Float // grammes
+  calories Float // kcal total cible
+
+  isTrainingDay Boolean @default(false) @map("is_training_day")
+  trainingType  String? @map("training_type") // "running_intense", "strength", "rest"
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, date])
+  @@map("nutrition_days")
+}
+
+// ─── WeightLog ───────────────────────────────────────────────────────────────
+// Historique du poids, alimenté automatiquement à chaque sauvegarde du profil
+// où le poids est renseigné (seule source pour le graphe de progression).
+model WeightLog {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  date       DateTime @db.Date
+  weight     Float // kg
+  bodyFatPct Float?   @map("body_fat_pct") // %
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, date])
+  @@map("weight_logs")
+}
+
+// ─── Notification ────────────────────────────────────────────────────────────
+model Notification {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type            NotificationType
+  severity        NotificationSeverity @default(INFO)
+  title           String
+  message         String
+  relatedEntityId String?              @map("related_entity_id")
+  read            Boolean              @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("notifications")
+}
+
+enum NotificationType {
+  SLEEP_ALERT
+  PR_CELEBRATION
+  OVERTRAINING_ALERT
+  PLAN_ADJUSTED
+  WEIGH_IN_REMINDER
+}
+
+enum NotificationSeverity {
+  INFO
+  SUCCESS
+  WARNING
+  DANGER
+}
+
+// ─── GarminData ──────────────────────────────────────────────────────────────
+model GarminData {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  dataType GarminDataType @map("data_type")
+  date     DateTime       @db.Date
+  payload  Json // données brutes Garmin
+
+  // Champs dénormalisés pour les requêtes fréquentes
+  summaryValue Float? @map("summary_value") // score sommeil, HRV, body battery, etc.
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, dataType, date])
+  @@map("garmin_data")
+}
+
+enum GarminDataType {
+  SLEEP
+  ACTIVITY
+  HRV
+  BODY_BATTERY
+  TRAINING_READINESS
+  TRAINING_STATUS
+  TRAINING_LOAD
+  STRESS
+  VO2MAX
+  RESTING_HR
+  MAX_HR
+}
+
+// ─── DailyCheckIn ────────────────────────────────────────────────────────────
+model DailyCheckIn {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  date             DateTime @db.Date
+  energy           Int // 1-5
+  soreness         Boolean  @default(false) // douleurs musculaires
+  sorenessLocation String?  @map("soreness_location") // localisation
+  motivation       Int // 1-5
+  stress           Int // 1-5
+  badEating        Boolean  @default(false) @map("bad_eating") // écart alimentaire (fast food...)
+  notes            String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, date])
+  @@map("daily_check_ins")
+}
+
+// ─── Activity ────────────────────────────────────────────────────────────────
+// Activités réelles importées d'Intervals.icu (lib/intervals/*) — indépendant
+// des TrainingSession planifiées, sert à afficher ce qui a vraiment été fait
+// (Dashboard, Historique) sans rapprochement automatique avec le plan.
+model Activity {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  externalId String   @map("external_id") // id Intervals.icu
+  sport      Sport
+  name       String
+  startDate  DateTime @map("start_date")
+
+  movingTimeSec   Int?   @map("moving_time_sec")
+  distanceMeters  Float? @map("distance_meters")
+  avgPaceSecPerKm Float? @map("avg_pace_sec_per_km") // course/nage
+  avgSpeedKph     Float? @map("avg_speed_kph") // vélo
+  avgHeartRate    Int?   @map("avg_heart_rate")
+  avgPower        Int?   @map("avg_power")
+  elevationGain   Float? @map("elevation_gain")
+
+  payload Json // réponse brute Intervals.icu, pour référence
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([userId, externalId])
+  @@map("activities")
+}
