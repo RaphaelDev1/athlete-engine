@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { PlanGoalType } from "@/lib/engine/types";
 import { WeekType } from "@/lib/types";
-import { Card, CardHeader, CardTitle, Badge, Select, Input } from "@/components/ui";
+import { Card, CardHeader, CardTitle, Badge, Input } from "@/components/ui";
 import { SessionCard } from "@/components/training/SessionCard";
 import { SessionDetailModal } from "@/components/training/SessionDetailModal";
 import { ReadinessBanner } from "@/components/dashboard/ReadinessBanner";
@@ -19,12 +19,32 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
-  Dumbbell,
-  Palmtree,
   FlaskConical,
   CalendarClock,
   CalendarDays,
+  ListChecks,
+  AlertTriangle,
+  Pin,
 } from "lucide-react";
+
+// Grosse séance au sens de l'alerte de placement (même seuil que
+// lib/engine/periodization.ts::isDemandingSession, dupliqué ici plutôt
+// qu'importé pour ne pas tirer tout le moteur de génération côté client) —
+// sert uniquement à colorer les jours pendant un drag, jamais à bloquer quoi
+// que ce soit.
+const HIGH_DEMAND_SESSION_TYPES = new Set([
+  "LONG_RUN",
+  "RACE",
+  "FITNESS_TEST",
+  "OPEN_WATER",
+  "BRICK",
+]);
+
+function isDemandingSession(s: SessionCardData): boolean {
+  if (HIGH_DEMAND_SESSION_TYPES.has(s.sessionType)) return true;
+  if ((s.targetRPE ?? 0) >= 7) return true;
+  return (s.duration ?? 0) >= 75;
+}
 
 interface WorkCycleDay {
   isWorkDay: boolean;
@@ -72,14 +92,6 @@ interface PlanData {
   weeks: PlanWeek[];
 }
 
-function hasProfileHint(profileMissing: boolean, vacationMode: boolean): string | false {
-  if (vacationMode) return false;
-  return (
-    profileMissing &&
-    "Profil non renseigné — plan basé sur des valeurs de départ génériques, complète ton profil pour des zones précises."
-  );
-}
-
 function toInputDate(date: Date): string {
   return date.toISOString().split("T")[0];
 }
@@ -122,10 +134,10 @@ function weekdayLabel(date: Date): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
-function addDays(date: Date, days: number): Date {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
+function daysBetween(a: Date, b: Date): number {
+  const utcA = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+  const utcB = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.round((utcB - utcA) / 86400000);
 }
 
 function isSameDay(a: Date, b: Date): boolean {
@@ -166,11 +178,12 @@ export default function TrainingPage() {
   const [planData, setPlanData] = useState<PlanData | null>(null);
   const [weekIndex, setWeekIndex] = useState(0);
   const [selectedSession, setSelectedSession] = useState<SessionCardData | null>(null);
-  const [profileMissing, setProfileMissing] = useState(false);
   const [draggedSession, setDraggedSession] = useState<SessionCardData | null>(null);
   const [postponing, setPostponing] = useState(false);
   const [readiness, setReadiness] = useState<ReadinessData | null>(null);
   const [workSchedule, setWorkSchedule] = useState<WorkScheduleData | null>(null);
+  const [placingId, setPlacingId] = useState<string | null>(null);
+  const [placeError, setPlaceError] = useState<string | null>(null);
 
   async function loadSchedule() {
     const res = await fetch("/api/training/schedule");
@@ -225,10 +238,6 @@ export default function TrainingPage() {
   }
 
   useEffect(() => {
-    fetch("/api/profile")
-      .then((res) => res.json())
-      .then(({ data }) => setProfileMissing(!data))
-      .catch(() => setProfileMissing(false));
     // Réutilise le calcul de récupération/charge du dashboard (sommeil, HRV,
     // check-in, ratio de charge) pour prévenir ici même si les facteurs de
     // repos ne sont pas bons pendant qu'on planifie les jours dispo.
@@ -241,24 +250,6 @@ export default function TrainingPage() {
     loadWorkSchedule();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  async function saveSchedule(next: ScheduleData) {
-    setSchedule(next);
-    await fetch("/api/training/schedule", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        goalType: next.goalType,
-        totalWeeks: next.totalWeeks,
-        startDate: next.startDate,
-        raceDate: next.raceDate,
-        vacationMode: next.vacationMode,
-        availableDays: next.availableDays,
-        weeklyTimeBudgetMin: next.weeklyTimeBudgetMin,
-      }),
-    });
-    await loadPlan();
-  }
 
   async function postpone() {
     if (!schedule) return;
@@ -274,9 +265,50 @@ export default function TrainingPage() {
     }
   }
 
+  // Placement manuel (drag & drop, tableau ci-dessous ou grille de la semaine
+  // affichée) — toujours autorisé, jamais bloqué par une alerte : les
+  // notifications d'alerte (cf. dropWarning) ne font qu'informer le choix.
+  async function placeSession(sessionId: string, date: Date) {
+    setPlacingId(sessionId);
+    setPlaceError(null);
+    try {
+      const res = await fetch(`/api/training/sessions/${sessionId}/place`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date: toInputDate(date) }),
+      });
+      if (!res.ok) {
+        const { error } = await res.json().catch(() => ({ error: null }));
+        setPlaceError(error ?? "Impossible de placer cette séance ici.");
+        return;
+      }
+      await loadPlan();
+    } finally {
+      setPlacingId(null);
+      setDraggedSession(null);
+    }
+  }
+
+  // Au premier chargement du plan, saute directement sur la semaine qui
+  // contient aujourd'hui plutôt que de rester sur weekIndex=0 (semaine 1,
+  // potentiellement très ancienne sur un plan de plusieurs mois) — sans quoi
+  // la grille "séances de la semaine" affiche une semaine passée qui n'a
+  // souvent plus aucune séance à montrer.
+  const [hasAutoSelectedWeek, setHasAutoSelectedWeek] = useState(false);
   useEffect(() => {
-    if (planData) setWeekIndex((i) => Math.min(i, planData.weeks.length - 1));
-  }, [planData]);
+    if (!planData) return;
+    if (!hasAutoSelectedWeek) {
+      const now = new Date();
+      now.setHours(0, 0, 0, 0);
+      const currentIndex = planData.weeks.findIndex(
+        (w) => now >= w.startDate && now <= w.endDate
+      );
+      setWeekIndex(currentIndex !== -1 ? currentIndex : 0);
+      setHasAutoSelectedWeek(true);
+      return;
+    }
+    setWeekIndex((i) => Math.min(i, planData.weeks.length - 1));
+  }, [planData, hasAutoSelectedWeek]);
 
   if (!schedule || !planData || planData.weeks.length === 0) {
     return (
@@ -287,14 +319,46 @@ export default function TrainingPage() {
     );
   }
 
-  const startDate = new Date(schedule.startDate);
-  const raceDate = schedule.raceDate ? new Date(schedule.raceDate) : null;
   const { plan, weeks } = planData;
   const week = weeks[Math.min(weekIndex, weeks.length - 1)];
   const weekTypeInfo = WEEK_TYPE_LABELS[week.weekType] ?? WEEK_TYPE_LABELS.LOAD;
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  const hint = hasProfileHint(profileMissing, schedule.vacationMode);
+
+  // Capacité approximative d'un jour donné — même règles que
+  // lib/training/schedule.ts::resolveDayAvailability (jour travaillé => 1,
+  // sinon 2 si la récup du moment est bonne, sinon 1), rejouées côté client à
+  // partir des mêmes données déjà chargées (workSchedule + readiness) pour
+  // colorer les jours pendant un drag sans aller-retour serveur. Ignore
+  // volontairement les surcharges ScheduleDayChoice et le cas "premier jour de
+  // repos après une série de jours travaillés" — un indice visuel, pas une
+  // règle dure.
+  function estimateDayCap(date: Date): number {
+    const badReadiness = readiness?.athleteState === "TIRED" || readiness?.athleteState === "OVERTRAINED";
+    if (workSchedule) {
+      const diff = daysBetween(new Date(`${workSchedule.anchorDate}T00:00:00`), date);
+      const idx = ((diff % 14) + 14) % 14;
+      if (workSchedule.pattern[idx]?.isWorkDay) return 1;
+    }
+    return badReadiness ? 1 : 2;
+  }
+
+  // Message d'alerte informatif affiché pendant le drag — n'empêche jamais le
+  // drop, se contente de guider le choix (cf. placeSession, toujours autorisé).
+  function dropWarning(date: Date, dragged: SessionCardData): string | null {
+    const daySessions = week.sessions.filter((s) => isSameDay(s.scheduledDate, date) && s.id !== dragged.id);
+    const cap = estimateDayCap(date);
+    if (daySessions.length >= cap) {
+      return `Jour déjà complet (max ${cap} séance${cap > 1 ? "s" : ""} ce jour-là)`;
+    }
+    if (isDemandingSession(dragged)) {
+      if (daySessions.some(isDemandingSession)) return "Déjà une grosse séance ce jour-là";
+      if (readiness?.athleteState === "TIRED" || readiness?.athleteState === "OVERTRAINED") {
+        return "Récupération faible en ce moment — séance exigeante à placer avec prudence";
+      }
+    }
+    return null;
+  }
 
   return (
     <div className="space-y-6">
@@ -321,118 +385,6 @@ export default function TrainingPage() {
           postponing={postponing}
         />
       )}
-
-      {/* Configuration du plan */}
-      <Card padding="lg">
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <Dumbbell className="w-5 h-5 text-brand-500" />
-            <CardTitle>Paramètres du plan</CardTitle>
-          </div>
-          <Badge variant="brand">
-            {formatDateRange(plan.startDate, plan.endDate)}
-          </Badge>
-        </CardHeader>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <Select
-            label="Objectif"
-            value={schedule.goalType}
-            onChange={(e) => {
-              const next = e.target.value as PlanGoalType;
-              saveSchedule({
-                ...schedule,
-                goalType: next,
-                totalWeeks: next === "TRIATHLON" ? 26 : schedule.totalWeeks,
-              });
-            }}
-            options={[
-              { value: "TRIATHLON", label: "Triathlon Sprint + Musculation" },
-              { value: "RUNNING", label: "Course seule" },
-              { value: "STRENGTH", label: "Musculation seule" },
-              { value: "MIXED", label: "Course + Musculation" },
-            ]}
-          />
-          <Input
-            label="Durée du plan"
-            type="number"
-            min={4}
-            max={104}
-            suffix="semaines"
-            value={schedule.totalWeeks}
-            onChange={(e) =>
-              saveSchedule({
-                ...schedule,
-                totalWeeks: Math.min(104, Math.max(4, Number(e.target.value) || 4)),
-              })
-            }
-          />
-          <Input
-            label="Date de début"
-            type="date"
-            value={toInputDate(startDate)}
-            onChange={(e) =>
-              e.target.value && saveSchedule({ ...schedule, startDate: e.target.value })
-            }
-          />
-          <Input
-            label={schedule.goalType === "TRIATHLON" ? "Jour J triathlon" : "Course visée"}
-            type="date"
-            hint="Optionnel — déclenche l'affûtage automatique"
-            value={raceDate ? toInputDate(raceDate) : ""}
-            onChange={(e) =>
-              saveSchedule({ ...schedule, raceDate: e.target.value || null })
-            }
-          />
-        </div>
-
-        <div className="mt-4 pt-4 border-t border-surface-700/60 flex items-center justify-between flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => saveSchedule({ ...schedule, vacationMode: !schedule.vacationMode })}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
-              schedule.vacationMode
-                ? "border-warning-500 bg-warning-500/10 text-warning-400"
-                : "border-surface-700 text-surface-400 hover:border-surface-600 hover:text-surface-200"
-            }`}
-          >
-            <Palmtree className="w-4 h-4" />
-            Mode vacances {schedule.vacationMode ? "activé" : "désactivé"}
-          </button>
-          {hint && <p className="text-xs text-surface-500">{hint}</p>}
-          {schedule.vacationMode && (
-            <p className="text-xs text-surface-500">
-              Pas de salle, piscine ni home trainer — séances au poids du corps et cardio libre.
-            </p>
-          )}
-        </div>
-        <div className="mt-4 pt-4 border-t border-surface-700/60">
-          <div className="max-w-xs">
-            <Input
-              label="Temps disponible cette semaine"
-              type="number"
-              min={0}
-              suffix="minutes"
-              hint="Optionnel — les séances sont réduites proportionnellement si dépassé"
-              value={schedule.weeklyTimeBudgetMin ?? ""}
-              onChange={(e) =>
-                saveSchedule({
-                  ...schedule,
-                  weeklyTimeBudgetMin: e.target.value ? Number(e.target.value) : null,
-                })
-              }
-            />
-          </div>
-        </div>
-
-        {schedule.shiftDays > 0 && (
-          <div className="mt-3 flex items-center gap-2 text-xs text-warning-400 bg-warning-500/10 border border-warning-500/20 rounded-lg px-3 py-2">
-            <CalendarClock className="w-3.5 h-3.5 flex-shrink-0" />
-            Plan décalé de {schedule.shiftDays} jour{schedule.shiftDays > 1 ? "s" : ""} par rapport
-            à la date de début initiale ({toInputDate(startDate)}).
-          </div>
-        )}
-      </Card>
 
       {/* Cycle de travail répétitif (ex. rythme de nuit) : déclaré une fois sur
           14 jours, appliqué indéfiniment à partir de anchorDate. Un jour
@@ -576,9 +528,18 @@ export default function TrainingPage() {
         </div>
 
         <p className="text-xs text-surface-500 mb-3">
-          Glisse une séance sur le jour suivant pour la reporter — toute la suite du plan
-          glissera d&apos;un jour avec elle.
+          Glisse une séance — d&apos;ici ou du tableau complet plus bas — sur n&apos;importe quel jour de
+          cette semaine pour la placer exactement où tu veux. Un jour qui s&apos;affiche en orange pendant
+          le glisser signale une alerte (jour déjà complet, grosse séance déjà prévue, récupération en
+          berne...) mais rien ne t&apos;empêche de forcer le placement si tu préfères.
         </p>
+
+        {placeError && (
+          <div className="mb-3 flex items-center gap-2 text-xs text-danger-400 bg-danger-500/10 border border-danger-500/20 rounded-lg px-3 py-2">
+            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+            {placeError}
+          </div>
+        )}
 
         {/* Grille des jours */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-3">
@@ -587,22 +548,26 @@ export default function TrainingPage() {
             const date = new Date(week.startDate);
             date.setDate(date.getDate() + dayOfWeek);
             const isToday = isSameDay(date, today);
-            const isValidDropTarget =
-              draggedSession !== null && isSameDay(date, addDays(draggedSession.scheduledDate, 1));
+            const warning = draggedSession ? dropWarning(date, draggedSession) : null;
 
             return (
               <div
                 key={dayOfWeek}
                 onDragOver={(e) => {
-                  if (isValidDropTarget) e.preventDefault();
+                  if (draggedSession) e.preventDefault();
                 }}
                 onDrop={(e) => {
                   e.preventDefault();
-                  if (isValidDropTarget) postpone();
+                  if (draggedSession) placeSession(draggedSession.id, date);
                 }}
                 className={`space-y-2 rounded-lg transition-colors ${
-                  isValidDropTarget ? "bg-brand-500/10 ring-2 ring-brand-500/40" : ""
+                  draggedSession
+                    ? warning
+                      ? "bg-warning-500/10 ring-2 ring-warning-500/40"
+                      : "bg-brand-500/10 ring-2 ring-brand-500/40"
+                    : ""
                 }`}
+                title={warning ?? undefined}
               >
                 <div className="px-1 flex items-center gap-1.5">
                   <p
@@ -640,6 +605,70 @@ export default function TrainingPage() {
                       onDragStart={setDraggedSession}
                       onDragEnd={() => setDraggedSession(null)}
                     />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Tableau complet : toutes les séances du plan, dans l'ordre, pour les
+          replacer où l'athlète veut plutôt que de subir le placement
+          automatique (cf. app/api/training/sessions/[id]/place). */}
+      <Card padding="lg">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <ListChecks className="w-5 h-5 text-brand-500" />
+            <CardTitle>Toutes tes séances</CardTitle>
+          </div>
+          <Badge variant="default">
+            {weeks.reduce((n, w) => n + w.sessions.filter((s) => s.sport !== "REST").length, 0)} séances
+          </Badge>
+        </CardHeader>
+        <p className="text-xs text-surface-500 mb-3">
+          Le programme complet, semaine par semaine. Glisse n&apos;importe laquelle sur un jour de la
+          semaine affichée ci-dessus (navigue avec les flèches pour viser une autre semaine) — une fois
+          placée à la main, elle reste où tu l&apos;as mise (icône <Pin className="inline w-3 h-3" />)
+          et n&apos;est plus jamais réorganisée automatiquement.
+        </p>
+        <div className="max-h-[36rem] overflow-y-auto pr-1 space-y-4">
+          {weeks.map((w) => {
+            const sessions = w.sessions.filter((s) => s.sport !== "REST");
+            if (sessions.length === 0) return null;
+            return (
+              <div key={w.id}>
+                <div className="sticky top-0 bg-surface-900/95 backdrop-blur px-1 py-1 mb-1.5 flex items-center gap-2">
+                  <p className="text-xs font-semibold text-surface-300">
+                    Semaine {w.weekNumber}
+                  </p>
+                  <span className="text-[11px] text-surface-500">
+                    {formatDateRange(w.startDate, w.endDate)}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {sessions.map((session) => (
+                    <div key={session.id} className="flex items-center gap-3">
+                      <div className="w-16 flex-shrink-0 text-right">
+                        <p className="text-[11px] text-surface-500 truncate">
+                          {weekdayLabel(session.scheduledDate).slice(0, 3)}
+                        </p>
+                        <p className="text-[10px] text-surface-600">
+                          {new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short" }).format(
+                            session.scheduledDate
+                          )}
+                        </p>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <SessionCard
+                          session={session}
+                          onSelect={setSelectedSession}
+                          draggable={placingId !== session.id}
+                          onDragStart={setDraggedSession}
+                          onDragEnd={() => setDraggedSession(null)}
+                        />
+                      </div>
+                    </div>
                   ))}
                 </div>
               </div>

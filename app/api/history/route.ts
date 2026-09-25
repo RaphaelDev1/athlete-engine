@@ -28,6 +28,17 @@ function addDays(d: Date, n: number): Date {
   return r;
 }
 
+export interface HistoryDaySessionExercise {
+  name: string;
+  sets: number | null;
+  reps: string | null;
+  weight: number | null;
+  actualSets: number | null;
+  actualReps: number | null;
+  actualWeight: number | null;
+  actualRPE: number | null;
+}
+
 export interface HistoryDaySession {
   id: string;
   sport: string;
@@ -39,6 +50,9 @@ export interface HistoryDaySession {
   targetDistance: number | null;
   targetRPE: number | null;
   actualRPE: number | null;
+  // Détail exercice par exercice (musculation) — utile seulement pour les
+  // séances STRENGTH loggées, cf. app/api/training/sessions/[id]/log.
+  exercises: HistoryDaySessionExercise[];
 }
 
 export interface HistoryDayActivity {
@@ -49,6 +63,10 @@ export interface HistoryDayActivity {
   movingTimeSec: number | null;
   avgPaceSecPerKm: number | null;
   avgSpeedKph: number | null;
+  avgHeartRate: number | null;
+  avgPower: number | null;
+  elevationGain: number | null;
+  calories: number | null;
 }
 
 export interface HistoryDay {
@@ -107,6 +125,19 @@ export async function GET(request: NextRequest) {
         status: true,
         actualRPE: true,
         targetRPE: true,
+        exercises: {
+          orderBy: { orderIndex: "asc" },
+          select: {
+            name: true,
+            sets: true,
+            reps: true,
+            weight: true,
+            actualSets: true,
+            actualReps: true,
+            actualWeight: true,
+            actualRPE: true,
+          },
+        },
       },
     }),
     prisma.activity.findMany({
@@ -125,6 +156,10 @@ export async function GET(request: NextRequest) {
         movingTimeSec: true,
         avgPaceSecPerKm: true,
         avgSpeedKph: true,
+        avgHeartRate: true,
+        avgPower: true,
+        elevationGain: true,
+        calories: true,
       },
     }),
     prisma.nutritionDay.findMany({ where: { userId: user.id, date: { gte: queryFrom, lte: queryTo } } }),
@@ -170,6 +205,10 @@ export async function GET(request: NextRequest) {
       movingTimeSec: a.movingTimeSec,
       avgPaceSecPerKm: a.avgPaceSecPerKm,
       avgSpeedKph: a.avgSpeedKph,
+      avgHeartRate: a.avgHeartRate,
+      avgPower: a.avgPower,
+      elevationGain: a.elevationGain,
+      calories: a.calories,
     });
   }
   for (const n of nutritionDays) {

@@ -58,6 +58,8 @@ export async function computeCurrentReadiness(userId: string): Promise<RecoveryS
           soreness: checkInToday.soreness,
           motivation: checkInToday.motivation,
           stress: checkInToday.stress,
+          sleepQuality: checkInToday.sleepQuality,
+          napTaken: checkInToday.napTaken,
         }
       : null,
     trainingLoad.ratio

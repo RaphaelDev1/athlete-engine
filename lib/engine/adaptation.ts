@@ -69,6 +69,8 @@ export interface CheckInSignals {
   soreness: boolean;
   motivation: number; // 1-5
   stress: number; // 1-5
+  sleepQuality: number | null; // 1-5, ressenti déclaré
+  napTaken: boolean; // sieste prise (utile en horaires décalés/travail de nuit)
 }
 
 // ─── Fusion readiness Garmin + check-in + charge ────────────────────────────
@@ -96,6 +98,44 @@ export function blendReadiness(
     if (checkIn.soreness) worsen("CAUTION", "Douleurs musculaires signalées au check-in");
     if (checkIn.motivation <= 2 && checkIn.energy <= 2) {
       worsen("CAUTION", "Motivation et énergie faibles au check-in");
+    }
+
+    // Sommeil auto-déclaré : seul signal fiable en horaires décalés (travail de
+    // nuit), là où le score de sommeil Garmin sous-estime souvent le sommeil
+    // de jour. Un mauvais ressenti dégrade la readiness comme les autres
+    // signaux.
+    if (checkIn.sleepQuality !== null && checkIn.sleepQuality <= 2) {
+      worsen("CAUTION", "Sommeil ressenti mauvais au check-in");
+    }
+
+    const reportedGoodRecovery =
+      (checkIn.sleepQuality !== null && checkIn.sleepQuality >= 4) || checkIn.napTaken;
+    const napReason = "Sieste prise avant la reprise du travail — récupération compensée";
+    const goodSleepReason = "Bon sommeil ressenti au check-in (horaires décalés)";
+
+    if (reportedGoodRecovery && level === "MAINTAIN") {
+      // Ne fait remonter le niveau que s'il n'y a par ailleurs aucun autre
+      // signal de fatigue.
+      level = "READY";
+      reasons.push(checkIn.napTaken ? napReason : goodSleepReason);
+    } else if (
+      reportedGoodRecovery &&
+      level === "CAUTION" &&
+      reasons.length === 1 &&
+      reasons[0] === "Score de sommeil sous 60"
+    ) {
+      // Seul signal dégradé = le score de sommeil Garmin lui-même — c'est
+      // précisément le signal peu fiable en horaires décalés. Le ressenti
+      // déclaré (ou une sieste avant la reprise) prime dessus. Les autres
+      // signaux Garmin (HRV, Training Readiness, Body Battery, charge...) ne
+      // sont eux jamais neutralisés par le ressenti.
+      level = "MAINTAIN";
+      reasons.length = 0;
+      reasons.push(
+        checkIn.napTaken
+          ? "Score de sommeil Garmin bas mais sieste prise avant la reprise — pris en compte"
+          : "Score de sommeil Garmin bas mais bon ressenti déclaré (horaires décalés) — pris en compte"
+      );
     }
   }
 

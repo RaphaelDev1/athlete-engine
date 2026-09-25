@@ -51,13 +51,19 @@ export function fetchSleep(
     if (!dto) return null;
     return {
       userId: "",
-      calendarDate: toDateString(date),
+      // Garmin peut rattacher ce sommeil à un jour différent de celui
+      // interrogé (ex. horaires décalés) — on garde son calendarDate quand il
+      // est fourni plutôt que de forcer celui de la boucle d'appel.
+      calendarDate: dto.calendarDate || toDateString(date),
       overallSleepScore: { value: dto.sleepScores?.overall?.value ?? 0 },
       durationInSeconds: dto.sleepTimeSeconds,
       deepSleepDurationInSeconds: dto.deepSleepSeconds,
       lightSleepDurationInSeconds: dto.lightSleepSeconds,
       remSleepInSeconds: dto.remSleepSeconds,
       awakeDurationInSeconds: dto.awakeSleepSeconds,
+      napDurationInSeconds: dto.napTimeSeconds,
+      sleepStartTimeLocal: dto.sleepStartTimestampLocal,
+      sleepEndTimeLocal: dto.sleepEndTimestampLocal,
     };
   });
 }

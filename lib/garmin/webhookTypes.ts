@@ -22,6 +22,15 @@ export interface GarminSleepItem extends GarminWebhookItemBase {
   lightSleepDurationInSeconds?: number;
   remSleepInSeconds?: number;
   awakeDurationInSeconds?: number;
+  // Sieste(s) du jour telles que comptabilisées par Garmin (napTimeSeconds) —
+  // distinctes du sommeil principal ci-dessus, utile pour les horaires
+  // décalés où une partie du repos se prend hors du bloc de nuit.
+  napDurationInSeconds?: number;
+  // Fenêtre réelle du sommeil principal (epoch ms, heure locale) — permet de
+  // vérifier qu'un sommeil décalé (ex. dormi le jour) est bien rattaché au
+  // bon jour plutôt que de ne s'appuyer que sur un score sans contexte.
+  sleepStartTimeLocal?: number;
+  sleepEndTimeLocal?: number;
 }
 
 export interface GarminActivityItem extends GarminWebhookItemBase {

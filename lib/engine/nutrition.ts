@@ -41,6 +41,7 @@ const MET_BY_SPORT: Record<Sport, (rpe: number) => number> = {
   STRENGTH: () => 5,
   MOBILITY: () => 2.5,
   REST: () => 0,
+  OTHER: () => 4, // jamais planifié — valeur médiane pour ne pas fausser le TDEE si jamais utilisé
 };
 
 export interface DaySessionLoad {

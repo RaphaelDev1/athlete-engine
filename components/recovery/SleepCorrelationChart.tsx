@@ -12,10 +12,69 @@ import {
   YAxis,
 } from "recharts";
 
+interface CorrelationChartRow {
+  date: string;
+  sleepScore: number | null;
+  stressScore: number | null;
+  badEatingMarker: number | null;
+  napMarker: number | null;
+  napMinutes: number | null;
+}
+
+// Tooltip custom : le composant Tooltip par défaut de recharts perd les
+// dataKey "badEatingMarker"/"napMarker" quand leur valeur est null (point
+// sans marqueur ce jour-là) et retombe sur le premier champ de la ligne
+// (date) — d'où une date qui apparaissait en double dans le tooltip
+// automatique. On ne dépend donc plus de son rendu par défaut, et on
+// n'affiche plus la date (déjà visible sur l'axe X).
+function CorrelationTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: CorrelationChartRow }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0].payload;
+
+  return (
+    <div
+      style={{
+        background: "#1e293b",
+        border: "1px solid #334155",
+        borderRadius: 8,
+        fontSize: 12,
+        padding: 10,
+      }}
+    >
+      {point.sleepScore !== null && (
+        <p style={{ color: "#8b5cf6", margin: 0, padding: "2px 0" }}>
+          Sommeil (Garmin) : {point.sleepScore}/100
+        </p>
+      )}
+      {point.stressScore !== null && (
+        <p style={{ color: "#f97316", margin: 0, padding: "2px 0" }}>
+          Stress (Garmin) : {point.stressScore}/100
+        </p>
+      )}
+      {point.napMinutes ? (
+        <p style={{ color: "#38bdf8", margin: 0, padding: "2px 0" }}>
+          Sieste : {point.napMinutes} min
+        </p>
+      ) : null}
+      {point.badEatingMarker ? (
+        <p style={{ color: "#ef4444", margin: 0, padding: "2px 0" }}>Écart alimentaire</p>
+      ) : null}
+    </div>
+  );
+}
+
 export interface SleepCorrelationPoint {
   date: string | Date;
   sleepScore: number | null;
-  stress: number | null; // 1-5, check-in
+  napMinutes: number | null; // sieste Garmin ou déclarée, en minutes
+  // Stress objectif Garmin (avgStressLevel, 0-100).
+  stressScore: number | null;
   badEating: boolean;
 }
 
@@ -24,17 +83,19 @@ interface SleepCorrelationChartProps {
   height?: number;
 }
 
-// Superpose score de sommeil (Garmin), stress ressenti (check-in) et jours
-// d'écart alimentaire — pour repérer si un mauvais sommeil suit plutôt un
-// pic de stress ou un écart alimentaire (fast food...) la veille.
+// Superpose score de sommeil (Garmin), siestes, stress objectif (Garmin) et
+// jours d'écart alimentaire — pour repérer si un mauvais sommeil suit plutôt
+// un pic de stress ou un écart alimentaire (fast food...) la veille.
 export function SleepCorrelationChart({ data, height = 220 }: SleepCorrelationChartProps) {
   const chartData = data.map((d) => ({
     date: new Date(d.date).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }),
     sleepScore: d.sleepScore,
-    stress: d.stress,
-    // Marqueur affiché tout en bas de l'axe stress (jamais atteint par de
-    // vraies valeurs de stress 1-5) — visuellement distinct de la ligne stress.
-    badEatingMarker: d.badEating ? 0.3 : null,
+    stressScore: d.stressScore,
+    // Marqueurs affichés tout en bas de l'axe stress (0-100) — sous les
+    // valeurs réelles de stress, jamais confondus avec elles.
+    badEatingMarker: d.badEating ? 2 : null,
+    napMarker: d.napMinutes ? 5 : null,
+    napMinutes: d.napMinutes,
   }));
 
   return (
@@ -59,33 +120,21 @@ export function SleepCorrelationChart({ data, height = 220 }: SleepCorrelationCh
           <YAxis
             yAxisId="stress"
             orientation="right"
-            domain={[0, 5]}
+            domain={[0, 100]}
             tick={{ fill: "#f97316", fontSize: 11 }}
             axisLine={false}
             tickLine={false}
             width={28}
           />
-          <Tooltip
-            contentStyle={{
-              background: "#1e293b",
-              border: "1px solid #334155",
-              borderRadius: 8,
-              fontSize: 12,
-            }}
-            labelStyle={{ color: "#94a3b8" }}
-            formatter={(value, name) => {
-              if (name === "badEatingMarker") return [value ? "Oui" : "", "Écart alimentaire"];
-              if (name === "sleepScore") return [`${value}/100`, "Sommeil"];
-              if (name === "stress") return [`${value}/5`, "Stress"];
-              return [value, name];
-            }}
-          />
+          <Tooltip content={<CorrelationTooltip />} />
           <Legend
             formatter={(value) =>
               value === "sleepScore"
-                ? "Sommeil"
-                : value === "stress"
-                ? "Stress"
+                ? "Sommeil (Garmin)"
+                : value === "stressScore"
+                ? "Stress (Garmin)"
+                : value === "napMarker"
+                ? "Sieste"
                 : "Écart alimentaire"
             }
             wrapperStyle={{ fontSize: 11, color: "#94a3b8" }}
@@ -102,14 +151,14 @@ export function SleepCorrelationChart({ data, height = 220 }: SleepCorrelationCh
           <Line
             yAxisId="stress"
             type="monotone"
-            dataKey="stress"
+            dataKey="stressScore"
             stroke="#f97316"
             strokeWidth={2}
-            strokeDasharray="4 3"
             dot={{ r: 2.5, fill: "#f97316" }}
             connectNulls
           />
           <Scatter yAxisId="stress" dataKey="badEatingMarker" fill="#ef4444" shape="diamond" />
+          <Scatter yAxisId="stress" dataKey="napMarker" fill="#38bdf8" shape="circle" />
         </ComposedChart>
       </ResponsiveContainer>
     </div>

@@ -78,6 +78,12 @@ model AthleteProfile {
   swimPace100m     Float? @map("swim_pace_100m") // sec/100m
   weeklySwimVolume Float? @map("weekly_swim_volume") // km/semaine
 
+  // Objectif de poids — pilote le sens de l'ajustement calorique par défaut
+  // en nutrition (lib/engine/nutrition.ts::GoalDirection), tant qu'aucun
+  // objectif de composition corporelle actif (Goal type COMPOSITION) ne le
+  // remplace par un calcul de rythme précis (cf. app/nutrition/page.tsx).
+  weightGoalDirection WeightGoalDirection @default(MAINTENANCE) @map("weight_goal_direction")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -89,6 +95,12 @@ model AthleteProfile {
 enum Sex {
   MALE
   FEMALE
+}
+
+enum WeightGoalDirection {
+  DEFICIT
+  MAINTENANCE
+  SURPLUS
 }
 
 enum ExperienceLevel {
@@ -351,6 +363,11 @@ model TrainingSession {
   actualRPE Float? @map("actual_rpe")
 
   status    SessionStatus @default(PLANNED)
+  // Placée manuellement par l'athlète sur le tableau (drag & drop, cf.
+  // app/training/page.tsx) — protège la séance (et la semaine qui la contient,
+  // cf. lib/training/materialize.ts) contre la régénération/le replacement
+  // automatique, au même titre qu'une séance déjà loggée.
+  isPinned  Boolean       @default(false) @map("is_pinned")
   notes     String?
   // Déroulé de la séance tel que généré (échauffement/corps/retour au calme) —
   // un instantané au moment de la matérialisation (lib/training/materialize.ts),
@@ -372,6 +389,11 @@ enum Sport {
   SWIMMING
   REST
   MOBILITY
+  // Activité Intervals.icu sans type exploitable (ex. séance importée via
+  // Strava — l'API Intervals.icu ne renvoie ni type ni détails pour ces
+  // activités, voir lib/intervals/mapping.ts). Jamais utilisé pour une
+  // TrainingSession planifiée, seulement pour une Activity synchronisée.
+  OTHER
 }
 
 enum SessionType {
@@ -456,6 +478,21 @@ model NutritionDay {
 
   isTrainingDay Boolean @default(false) @map("is_training_day")
   trainingType  String? @map("training_type") // "running_intense", "strength", "rest"
+
+  // Ce qui a réellement été mangé, décrit librement ("en gros") par
+  // l'athlète — pas un suivi calorique précis par aliment, juste de quoi se
+  // souvenir/comparer au ressenti.
+  actualIntakeNotes String? @map("actual_intake_notes")
+
+  // Calories réellement consommées ce jour-là, saisies à la main par
+  // l'athlète — comparées à `calories` (la cible) pour visualiser le
+  // déficit/surplus réel, cf. app/nutrition/page.tsx.
+  actualCalories Float? @map("actual_calories")
+
+  // Écart alimentaire (fast food...) déclaré ce jour-là — anciennement sur
+  // DailyCheckIn, déplacé ici pour rester au même endroit que le reste du
+  // suivi nutritionnel réel de la journée.
+  badEating Boolean @default(false) @map("bad_eating")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -560,7 +597,9 @@ model DailyCheckIn {
   sorenessLocation String?  @map("soreness_location") // localisation
   motivation       Int // 1-5
   stress           Int // 1-5
-  badEating        Boolean  @default(false) @map("bad_eating") // écart alimentaire (fast food...)
+  sleepQuality     Int?     @map("sleep_quality") // 1-5, ressenti déclaré — utile en horaires décalés où Garmin ne capte pas bien le sommeil de jour
+  napTaken         Boolean  @default(false) @map("nap_taken") // sieste prise (ex. avant la reprise d'un poste de nuit)
+  napDurationMin   Int?     @map("nap_duration_min")
   notes            String?
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -590,8 +629,14 @@ model Activity {
   avgHeartRate    Int?   @map("avg_heart_rate")
   avgPower        Int?   @map("avg_power")
   elevationGain   Float? @map("elevation_gain")
+  calories        Int?   @map("calories") // kcal dépensées, champ `calories` Intervals.icu
 
   payload Json // réponse brute Intervals.icu, pour référence
+
+  // Posée dès qu'un champ ci-dessus est corrigé à la main (voir
+  // app/api/activities/[id]/route.ts) — empêche lib/intervals/store.ts de les
+  // écraser avec les valeurs Intervals.icu à la resynchronisation suivante.
+  manuallyEditedAt DateTime? @map("manually_edited_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

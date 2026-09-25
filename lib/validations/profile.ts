@@ -13,6 +13,9 @@ export const profileSchema = z.object({
   sex: z.enum(["MALE", "FEMALE"]).nullable(),
   bodyFatPct: z.coerce.number().min(3).max(60).nullable(),
 
+  // Objectif de poids — maintien, perte (déficit) ou prise (surplus).
+  weightGoalDirection: z.enum(["DEFICIT", "MAINTENANCE", "SURPLUS"]),
+
   // Musculation
   experienceLevel: z.enum(["BEGINNER", "INTERMEDIATE", "ADVANCED"]).nullable(),
   weeklyFrequency: z.coerce.number().int().min(1).max(7).nullable(),
@@ -48,6 +51,7 @@ export const defaultProfileValues: ProfileFormValues = {
   dateOfBirth: null,
   sex: null,
   bodyFatPct: null,
+  weightGoalDirection: "MAINTENANCE",
   experienceLevel: null,
   weeklyFrequency: null,
   pr5k: null,

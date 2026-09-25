@@ -7,8 +7,12 @@ import { Sport } from "@/lib/types";
 
 export interface IntervalsRawActivity {
   id: string;
-  name: string;
-  type: string;
+  // `name`/`type` absents pour les activités importées via Strava : l'API
+  // Intervals.icu ne les redistribue pas (restriction des CGU Strava), elle
+  // ne renvoie que id/athlete/date/source pour ces activités-là.
+  name?: string;
+  type?: string;
+  source?: string;
   start_date_local: string;
   moving_time?: number | null; // secondes
   distance?: number | null; // mètres
@@ -17,6 +21,7 @@ export interface IntervalsRawActivity {
   average_watts?: number | null;
   average_heartrate?: number | null;
   total_elevation_gain?: number | null;
+  calories?: number | null;
   [key: string]: unknown;
 }
 
@@ -38,6 +43,20 @@ const SPORT_BY_TYPE: Record<string, Sport> = {
 // Sports où l'allure (sec/km) a du sens ; les autres (vélo) utilisent la vitesse.
 const PACE_SPORTS: Sport[] = ["RUNNING", "SWIMMING"];
 
+/** Dérive allure/vitesse moyenne à partir de la distance et de la durée — utilisé au pull et à l'édition manuelle (app/api/activities/[id]). */
+export function computePaceAndSpeed(
+  sport: Sport,
+  movingTimeSec: number | null,
+  distanceMeters: number | null
+): { avgPaceSecPerKm: number | null; avgSpeedKph: number | null } {
+  if (!movingTimeSec || !distanceMeters || distanceMeters <= 0) {
+    return { avgPaceSecPerKm: null, avgSpeedKph: null };
+  }
+  if (PACE_SPORTS.includes(sport)) {
+    return { avgPaceSecPerKm: movingTimeSec / (distanceMeters / 1000), avgSpeedKph: null };
+  }
+  return { avgPaceSecPerKm: null, avgSpeedKph: (distanceMeters / 1000) / (movingTimeSec / 3600) };
+}
 
 export interface NormalizedActivity {
   externalId: string;
@@ -51,34 +70,39 @@ export interface NormalizedActivity {
   avgHeartRate: number | null;
   avgPower: number | null;
   elevationGain: number | null;
+  calories: number | null;
   payload: IntervalsRawActivity;
 }
 
-/** Retourne `null` si le type d'activité n'a pas d'équivalent dans notre `Sport` (ignoré au pull). */
-export function normalizeActivity(raw: IntervalsRawActivity): NormalizedActivity | null {
-  const sport = SPORT_BY_TYPE[raw.type];
-  if (!sport) return null;
+/**
+ * Ne retourne jamais `null` : une activité sans `type` reconnu (ou sans type
+ * du tout — cas des activités importées via Strava, que l'API Intervals.icu
+ * renvoie quasi vides, voir `source`/`_note` dans le payload brut) est quand
+ * même importée avec le sport "OTHER" et les champs disponibles ; le reste
+ * est à compléter manuellement.
+ */
+export function normalizeActivity(raw: IntervalsRawActivity): NormalizedActivity {
+  const sport = (raw.type && SPORT_BY_TYPE[raw.type]) || "OTHER";
 
   const movingTimeSec = raw.moving_time ?? null;
   const distanceMeters = raw.distance ?? null;
 
-  let avgPaceSecPerKm: number | null = null;
-  let avgSpeedKph: number | null = null;
-
-  if (movingTimeSec && distanceMeters && distanceMeters > 0) {
-    if (PACE_SPORTS.includes(sport)) {
-      avgPaceSecPerKm = movingTimeSec / (distanceMeters / 1000);
-    } else {
-      avgSpeedKph = raw.average_speed
-        ? raw.average_speed * 3.6
-        : (distanceMeters / 1000) / (movingTimeSec / 3600);
-    }
-  }
+  const { avgPaceSecPerKm, avgSpeedKph: computedSpeedKph } = computePaceAndSpeed(
+    sport,
+    movingTimeSec,
+    distanceMeters
+  );
+  // Quand Intervals.icu fournit une vitesse moyenne GPS mesurée (average_speed),
+  // elle est plus fidèle que distance/temps (arrêts, drift GPS) : on la préfère
+  // — uniquement pour les sports "vitesse" (course/nage affichent une allure, pas
+  // une vitesse, cf. PACE_SPORTS).
+  const avgSpeedKph =
+    !PACE_SPORTS.includes(sport) && raw.average_speed ? raw.average_speed * 3.6 : computedSpeedKph;
 
   return {
     externalId: raw.id,
     sport,
-    name: raw.name,
+    name: raw.name || `Activité${raw.source ? ` ${raw.source}` : ""} à compléter`,
     startDate: new Date(raw.start_date_local),
     movingTimeSec,
     distanceMeters,
@@ -87,6 +111,7 @@ export function normalizeActivity(raw: IntervalsRawActivity): NormalizedActivity
     avgHeartRate: raw.average_heartrate ?? null,
     avgPower: raw.icu_average_watts ?? raw.average_watts ?? null,
     elevationGain: raw.total_elevation_gain ?? null,
+    calories: raw.calories ?? null,
     payload: raw,
   };
 }

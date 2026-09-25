@@ -16,18 +16,89 @@ function parseDateParam(value: string | null): Date {
   return d;
 }
 
+// Clé de date en calendrier LOCAL — même correctif que app/api/history/route.ts :
+// Activity.startDate est l'horodatage réel Intervals.icu/Garmin (pas un minuit
+// UTC brut comme `date` ci-dessus), donc jamais toISOString() ici.
+function toDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 // Historise la cible nutritionnelle du jour (Phase 4/6) — jusqu'ici purement
 // calculée côté client (app/nutrition/page.tsx) et jamais persistée, ce qui
 // rendait tout historique nutrition impossible (voir /api/history, Phase 6).
+//
+// `days` renvoie l'historique des N derniers jours (badEating notamment,
+// utilisé par /recovery pour la corrélation sommeil/stress/écarts
+// alimentaires) plutôt qu'un seul jour ciblé par `date`.
 export async function GET(request: NextRequest) {
   const user = await getDefaultUser();
+  const daysParam = request.nextUrl.searchParams.get("days");
+
+  if (daysParam) {
+    const since = new Date();
+    since.setDate(since.getDate() - Number(daysParam));
+    const history = await prisma.nutritionDay.findMany({
+      where: { userId: user.id, date: { gte: since } },
+      orderBy: { date: "asc" },
+    });
+    return NextResponse.json({ history });
+  }
+
   const date = parseDateParam(request.nextUrl.searchParams.get("date"));
+  const dateKey = toDateKey(date);
+  const queryFrom = new Date(date);
+  queryFrom.setDate(queryFrom.getDate() - 1);
+  const queryTo = new Date(date);
+  queryTo.setDate(queryTo.getDate() + 1);
 
-  const day = await prisma.nutritionDay.findUnique({
-    where: { userId_date: { userId: user.id, date } },
-  });
+  const [day, activitiesRaw] = await Promise.all([
+    prisma.nutritionDay.findUnique({
+      where: { userId_date: { userId: user.id, date } },
+    }),
+    // Activités réelles (Intervals.icu/Garmin) du jour affiché — pour montrer
+    // tout ce qui a été fait ce jour-là (y compris hors plan, ex. padel), pas
+    // seulement les séances planifiées. Marge d'1 jour de chaque côté puis
+    // filtre sur la clé de date LOCALE, cf. toDateKey ci-dessus.
+    prisma.activity.findMany({
+      where: { userId: user.id, startDate: { gte: queryFrom, lte: queryTo } },
+      orderBy: { startDate: "asc" },
+      select: {
+        id: true,
+        sport: true,
+        name: true,
+        startDate: true,
+        distanceMeters: true,
+        movingTimeSec: true,
+        avgPaceSecPerKm: true,
+        avgSpeedKph: true,
+        avgHeartRate: true,
+        avgPower: true,
+        elevationGain: true,
+        calories: true,
+      },
+    }),
+  ]);
 
-  return NextResponse.json({ data: day });
+  const activities = activitiesRaw
+    .filter((a) => toDateKey(a.startDate) === dateKey)
+    .map((a) => ({
+      id: a.id,
+      sport: a.sport,
+      name: a.name,
+      distanceMeters: a.distanceMeters,
+      movingTimeSec: a.movingTimeSec,
+      avgPaceSecPerKm: a.avgPaceSecPerKm,
+      avgSpeedKph: a.avgSpeedKph,
+      avgHeartRate: a.avgHeartRate,
+      avgPower: a.avgPower,
+      elevationGain: a.elevationGain,
+      calories: a.calories,
+    }));
+
+  return NextResponse.json({ data: day, activities });
 }
 
 const nutritionDaySchema = z.object({
@@ -40,6 +111,9 @@ const nutritionDaySchema = z.object({
   calories: z.number(),
   isTrainingDay: z.boolean(),
   trainingType: z.string().nullable(),
+  actualIntakeNotes: z.string().max(1000).nullable().optional(),
+  actualCalories: z.number().min(0).max(20000).nullable().optional(),
+  badEating: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -68,6 +142,13 @@ export async function POST(request: Request) {
         calories: data.calories,
         isTrainingDay: data.isTrainingDay,
         trainingType: data.trainingType,
+        // undefined (champ omis par l'appelant) laisse la valeur existante
+        // intacte — permet à la sauvegarde auto des cibles macros de ne pas
+        // écraser une note ou des calories déjà saisies par l'athlète, cf.
+        // app/nutrition/page.tsx.
+        actualIntakeNotes: data.actualIntakeNotes,
+        actualCalories: data.actualCalories,
+        badEating: data.badEating,
       },
       create: {
         userId: user.id,
@@ -80,6 +161,9 @@ export async function POST(request: Request) {
         calories: data.calories,
         isTrainingDay: data.isTrainingDay,
         trainingType: data.trainingType,
+        actualIntakeNotes: data.actualIntakeNotes ?? null,
+        actualCalories: data.actualCalories ?? null,
+        badEating: data.badEating ?? false,
       },
     });
 

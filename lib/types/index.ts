@@ -31,7 +31,9 @@ export type Sport =
   | "CYCLING"
   | "SWIMMING"
   | "REST"
-  | "MOBILITY";
+  | "MOBILITY"
+  // Activité synchronisée sans sport identifiable (voir prisma/schema.prisma::Sport).
+  | "OTHER";
 
 export type SessionType =
   | "LONG_RUN"

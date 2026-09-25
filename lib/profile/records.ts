@@ -21,6 +21,10 @@ export const SWIMMING_PR_FIELDS = {
   pr400mSwim: "400m",
 } as const;
 
+export const CYCLING_PR_FIELDS = {
+  ftp: "FTP",
+} as const;
+
 // Résultats des séances FITNESS_TEST (lib/engine/templates/{running,strength,cycling,swimming}.ts)
 // — saisis depuis SessionDetailModal et enregistrés comme PersonalRecord au
 // même titre que les PR du profil, pour tracer l'évolution dans le temps

@@ -14,6 +14,9 @@ import {
   Bike,
   Footprints,
   Sparkles,
+  CircleDot,
+  Mountain,
+  LucideIcon,
 } from "lucide-react";
 import { Card, CardHeader, CardTitle, StatCard, Badge, EmptyState, Button } from "@/components/ui";
 import { TrendLineChart } from "@/components/charts/TrendLineChart";
@@ -26,8 +29,10 @@ import { WeighInPromptCard } from "./WeighInPromptCard";
 import { CheckInModal } from "@/components/checkin/CheckInModal";
 import { CheckInFormValues } from "@/lib/validations/checkin";
 import { formatSecondsToTime } from "@/lib/utils/time";
-import { SPORT_COLOR, SPORT_ICON, SPORT_LABEL, STATUS_LABELS, formatDuration } from "@/components/training/sessionMeta";
+import { SPORT_COLOR, SPORT_ICON, STATUS_LABELS, formatDuration } from "@/components/training/sessionMeta";
 import { AthleteState } from "@/lib/engine/labels";
+import { categorizeSport } from "@/lib/training/sportCategory";
+import { Sport } from "@/lib/types";
 import Link from "next/link";
 
 interface PersonalRecordRow {
@@ -84,7 +89,6 @@ interface DashboardData {
     soreness: boolean;
     motivation: number;
     stress: number;
-    badEating: boolean;
   } | null;
   adaptationActions: AdaptationActionView[];
   predictions: PredictionsData;
@@ -92,6 +96,13 @@ interface DashboardData {
   recentSessions: SessionRow[];
   lastWeightLogDate: string | null;
   activitiesThisWeek: ActivitySportSummary[];
+  recentActivities: RecentActivityRow[];
+  recentActivitiesTable: RecentActivityRow[];
+  recentActivitiesByCategory: {
+    category: DashboardActivityCategory;
+    label: string;
+    activities: RecentActivityRow[];
+  }[];
   intervals: {
     configured: boolean;
     lastSyncAt: string | null;
@@ -124,7 +135,7 @@ interface PredictionsData {
 }
 
 interface ActivitySportSummary {
-  sport: "RUNNING" | "CYCLING" | "SWIMMING" | "STRENGTH";
+  sport: "RUNNING" | "CYCLING" | "SWIMMING" | "STRENGTH" | "OTHER";
   sessions: number;
   totalDistanceKm: number | null;
   totalDurationMin: number | null;
@@ -132,23 +143,292 @@ interface ActivitySportSummary {
   avgSpeedKph: number | null;
 }
 
-// Allure/vitesse dans l'unité qui a du sens par sport — natation en /100m
-// (convention du milieu), course en /km, vélo en km/h.
-function formatActivityPace(summary: ActivitySportSummary): string {
-  if (summary.sport === "SWIMMING" && summary.avgPaceSecPerKm) {
-    return `${formatSecondsToTime(summary.avgPaceSecPerKm / 10)} /100m`;
+type DashboardActivityCategory =
+  | "RUNNING"
+  | "CYCLING"
+  | "SWIMMING"
+  | "RACQUET"
+  | "STRENGTH"
+  | "OUTDOOR"
+  | "OTHER";
+
+interface RecentActivityRow {
+  id: string;
+  sport: string;
+  name: string | null;
+  startDate: string;
+  distanceMeters: number | null;
+  movingTimeSec: number | null;
+  avgPaceSecPerKm: number | null;
+  avgSpeedKph: number | null;
+  avgHeartRate: number | null;
+  avgPower: number | null;
+  elevationGain: number | null;
+  calories: number | null;
+}
+
+const ACTIVITY_CATEGORY_ICON: Record<DashboardActivityCategory, LucideIcon> = {
+  RUNNING: Footprints,
+  CYCLING: Bike,
+  SWIMMING: Waves,
+  RACQUET: CircleDot,
+  STRENGTH: Dumbbell,
+  OUTDOOR: Mountain,
+  OTHER: Activity,
+};
+
+// Une couleur par catégorie — sert à repérer le sport d'un coup d'œil dans
+// "Séances de la semaine" (components/dashboard/DashboardContent.tsx::WeekSessionsTable),
+// qui n'affichait jusqu'ici que des icônes grises.
+const ACTIVITY_CATEGORY_COLOR: Record<DashboardActivityCategory, string> = {
+  RUNNING: "text-brand-400 bg-brand-500/15",
+  CYCLING: "text-success-400 bg-success-500/15",
+  SWIMMING: "text-info-400 bg-info-500/15",
+  RACQUET: "text-fuchsia-400 bg-fuchsia-500/15",
+  STRENGTH: "text-danger-400 bg-danger-500/15",
+  OUTDOOR: "text-teal-400 bg-teal-500/15",
+  OTHER: "text-surface-400 bg-surface-500/15",
+};
+
+// Distance/durée + allure ou vitesse selon le sport.
+function formatActivityMetrics(activity: RecentActivityRow): string {
+  const parts: string[] = [];
+  if (activity.distanceMeters) {
+    parts.push(`${(activity.distanceMeters / 1000).toFixed(1)} km`);
   }
-  if (summary.avgPaceSecPerKm) {
-    return `${formatSecondsToTime(summary.avgPaceSecPerKm)} /km`;
+  if (activity.movingTimeSec) {
+    parts.push(formatSecondsToTime(activity.movingTimeSec) ?? "");
   }
-  if (summary.avgSpeedKph) {
-    return `${summary.avgSpeedKph.toFixed(1)} km/h`;
+  if (activity.sport === "SWIMMING" && activity.avgPaceSecPerKm) {
+    parts.push(`${formatSecondsToTime(activity.avgPaceSecPerKm / 10)}/100m`);
+  } else if (activity.avgPaceSecPerKm) {
+    parts.push(`${formatSecondsToTime(activity.avgPaceSecPerKm)}/km`);
+  } else if (activity.avgSpeedKph) {
+    parts.push(`${activity.avgSpeedKph.toFixed(1)} km/h`);
   }
+  return parts.filter(Boolean).join(" · ") || "—";
+}
+
+function ActivityRow({ activity }: { activity: RecentActivityRow }) {
+  const category = dashboardCategoryOf(activity.sport, activity.name);
+  const Icon = ACTIVITY_CATEGORY_ICON[category];
+  return (
+    <div className="flex items-center justify-between gap-3 p-2.5 rounded-lg bg-surface-850 hover:bg-surface-800 transition-colors">
+      <div className="flex items-center gap-2.5 min-w-0">
+        <Icon className="w-4 h-4 text-surface-400 flex-shrink-0" />
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-surface-100 truncate">
+            {activity.name || DASHBOARD_ACTIVITY_LABELS[category]}
+          </p>
+          <p className="text-xs text-surface-500">
+            {DASHBOARD_ACTIVITY_LABELS[category]} ·{" "}
+            {new Date(activity.startDate).toLocaleDateString("fr-FR", {
+              weekday: "short",
+              day: "2-digit",
+              month: "2-digit",
+            })}
+          </p>
+        </div>
+      </div>
+      <p className="text-xs text-surface-400 text-right whitespace-nowrap">{formatActivityMetrics(activity)}</p>
+    </div>
+  );
+}
+
+const DASHBOARD_ACTIVITY_LABELS: Record<DashboardActivityCategory, string> = {
+  RUNNING: "Course",
+  CYCLING: "Vélo",
+  SWIMMING: "Natation",
+  RACQUET: "Sports de raquette",
+  STRENGTH: "Musculation",
+  OUTDOOR: "Plein air",
+  OTHER: "Autre",
+};
+
+function dashboardCategoryOf(sport: string, name?: string | null): DashboardActivityCategory {
+  if (sport === "RUNNING" || sport === "CYCLING" || sport === "SWIMMING" || sport === "STRENGTH") {
+    return sport;
+  }
+  const category = categorizeSport(sport as Sport, name);
+  if (category === "RACQUET" || category === "OUTDOOR") return category;
+  return "OTHER";
+}
+
+function activityDistanceLabel(activity: RecentActivityRow): string {
+  return activity.distanceMeters ? `${(activity.distanceMeters / 1000).toFixed(1)} km` : "—";
+}
+
+function activityDurationLabel(activity: RecentActivityRow): string {
+  return activity.movingTimeSec ? formatSecondsToTime(activity.movingTimeSec) ?? "—" : "—";
+}
+
+function activityPaceLabel(activity: RecentActivityRow): string {
+  if (activity.sport === "SWIMMING" && activity.avgPaceSecPerKm) {
+    return `${formatSecondsToTime(activity.avgPaceSecPerKm / 10)} /100m`;
+  }
+  if (activity.avgPaceSecPerKm) return `${formatSecondsToTime(activity.avgPaceSecPerKm)} /km`;
+  if (activity.avgSpeedKph) return `${activity.avgSpeedKph.toFixed(1)} km/h`;
   return "—";
 }
 
-function formatKm(value: number | null): string {
-  return value !== null ? `${value.toFixed(1)} km` : "—";
+function activityHeartRateLabel(activity: RecentActivityRow): string {
+  return activity.avgHeartRate ? `${activity.avgHeartRate} bpm` : "—";
+}
+
+function activityCaloriesLabel(activity: RecentActivityRow): string {
+  return activity.calories ? `${activity.calories} kcal` : "—";
+}
+
+const WEEK_TABLE_FILTER_ORDER: DashboardActivityCategory[] = [
+  "RUNNING",
+  "CYCLING",
+  "SWIMMING",
+  "STRENGTH",
+  "RACQUET",
+  "OUTDOOR",
+  "OTHER",
+];
+
+// Tableau complet des séances (toutes sources Garmin/Strava synchronisées via
+// Intervals.icu), avec filtre par sport — remplace l'ancien agrégat limité à
+// la semaine en cours, qui restait vide tant qu'aucune activité n'avait
+// encore été synchronisée cette semaine-là.
+function WeekSessionsTable({
+  activities,
+  thisWeek,
+  sportFilter,
+  onSportFilterChange,
+}: {
+  activities: RecentActivityRow[];
+  thisWeek: ActivitySportSummary[];
+  sportFilter: DashboardActivityCategory | "ALL";
+  onSportFilterChange: (next: DashboardActivityCategory | "ALL") => void;
+}) {
+  const categorized = activities.map((a) => ({
+    activity: a,
+    category: dashboardCategoryOf(a.sport, a.name),
+  }));
+  const availableCategories = WEEK_TABLE_FILTER_ORDER.filter((cat) =>
+    categorized.some((c) => c.category === cat)
+  );
+  const filtered =
+    sportFilter === "ALL" ? categorized : categorized.filter((c) => c.category === sportFilter);
+  const thisWeekCount = thisWeek.reduce((sum, s) => sum + s.sessions, 0);
+  // Durée/FC moyenne/calories toujours affichées, quel que soit le sport ;
+  // le vélo ajoute distance et allure/vitesse, plus pertinentes que pour les
+  // autres sports (souvent sans distance fiable — raquette, muscu...).
+  const isCyclingFilter = sportFilter === "CYCLING";
+
+  return (
+    <div>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <p className="text-xs text-surface-500">
+          {thisWeekCount > 0
+            ? `${thisWeekCount} séance${thisWeekCount > 1 ? "s" : ""} cette semaine`
+            : "Aucune séance cette semaine — voici tes activités les plus récentes"}
+        </p>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <button
+            onClick={() => onSportFilterChange("ALL")}
+            className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+              sportFilter === "ALL"
+                ? "border-brand-500/50 bg-brand-500/15 text-brand-300"
+                : "border-surface-700 text-surface-400 hover:text-surface-200 hover:border-surface-600"
+            }`}
+          >
+            Tous
+          </button>
+          {availableCategories.map((cat) => {
+            const Icon = ACTIVITY_CATEGORY_ICON[cat];
+            return (
+              <button
+                key={cat}
+                onClick={() => onSportFilterChange(cat)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
+                  sportFilter === cat
+                    ? "border-brand-500/50 bg-brand-500/15 text-brand-300"
+                    : "border-surface-700 text-surface-400 hover:text-surface-200 hover:border-surface-600"
+                }`}
+              >
+                <Icon className="w-3 h-3" />
+                {DASHBOARD_ACTIVITY_LABELS[cat]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="text-sm text-surface-500 py-4 text-center">Aucune activité pour ce filtre.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs text-surface-500 uppercase tracking-wider border-b border-surface-800">
+                <th className="py-2 pr-3 font-medium">Date</th>
+                <th className="py-2 pr-3 font-medium">Sport</th>
+                <th className="py-2 pr-3 font-medium">Séance</th>
+                {isCyclingFilter && <th className="py-2 pr-3 font-medium">Distance</th>}
+                <th className="py-2 pr-3 font-medium">Durée</th>
+                {isCyclingFilter && <th className="py-2 pr-3 font-medium">Allure / vitesse</th>}
+                <th className="py-2 pr-3 font-medium">FC moyenne</th>
+                <th className="py-2 pr-3 font-medium">Calories</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(({ activity, category }) => {
+                const Icon = ACTIVITY_CATEGORY_ICON[category];
+                return (
+                  <tr
+                    key={activity.id}
+                    className="border-b border-surface-800/60 last:border-b-0 hover:bg-surface-850/60"
+                  >
+                    <td className="py-2.5 pr-3 text-surface-400 whitespace-nowrap">
+                      {new Date(activity.startDate).toLocaleDateString("fr-FR", {
+                        weekday: "short",
+                        day: "2-digit",
+                        month: "2-digit",
+                      })}
+                    </td>
+                    <td className="py-2.5 pr-3">
+                      <div className="flex items-center gap-1.5 whitespace-nowrap">
+                        <span className={`p-1 rounded-md ${ACTIVITY_CATEGORY_COLOR[category]}`}>
+                          <Icon className="w-3 h-3" />
+                        </span>
+                        <span className="text-surface-200">{DASHBOARD_ACTIVITY_LABELS[category]}</span>
+                      </div>
+                    </td>
+                    <td className="py-2.5 pr-3 text-surface-300 max-w-[14rem] truncate">
+                      {activity.name || "—"}
+                    </td>
+                    {isCyclingFilter && (
+                      <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
+                        {activityDistanceLabel(activity)}
+                      </td>
+                    )}
+                    <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
+                      {activityDurationLabel(activity)}
+                    </td>
+                    {isCyclingFilter && (
+                      <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
+                        {activityPaceLabel(activity)}
+                      </td>
+                    )}
+                    <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
+                      {activityHeartRateLabel(activity)}
+                    </td>
+                    <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
+                      {activityCaloriesLabel(activity)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function groupRecordsByExercise(records: PersonalRecordRow[]) {
@@ -195,6 +475,7 @@ export function DashboardContent() {
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [postponing, setPostponing] = useState(false);
+  const [weekTableSportFilter, setWeekTableSportFilter] = useState<DashboardActivityCategory | "ALL">("ALL");
 
   async function load() {
     const res = await fetch("/api/dashboard");
@@ -352,7 +633,7 @@ export function DashboardContent() {
           icon={Heart}
         />
         <StatCard
-          label="Volume hebdo"
+          label="Volume hebdo course"
           value={data.profile?.weeklyVolume ?? "—"}
           unit="km"
           icon={TrendingUp}
@@ -455,7 +736,12 @@ export function DashboardContent() {
         )}
       </Card>
 
-      {/* Séances de la semaine par sport (Intervals.icu) — vue façon Strava */}
+      {/* Séances de la semaine par sport (Garmin/Strava via Intervals.icu) —
+          vue façon Strava. Contrairement à l'ancien agrégat limité à la
+          semaine en cours (vide dès qu'aucune activité n'était encore
+          synchronisée cette semaine), affiche toujours le détail activité par
+          activité dès qu'il existe un historique, avec un filtre par sport —
+          le résumé hebdo (activitiesThisWeek) reste visible en en-tête. */}
       <Card padding="lg">
         <CardHeader>
           <CardTitle>Séances de la semaine</CardTitle>
@@ -484,10 +770,10 @@ export function DashboardContent() {
             title="Intervals.icu non connecté"
             description="Renseigne les identifiants Intervals.icu dans la configuration serveur pour importer tes activités réelles."
           />
-        ) : data.activitiesThisWeek.length === 0 ? (
+        ) : data.recentActivitiesTable.length === 0 ? (
           <EmptyState
             icon={Activity}
-            title="Pas encore d'activité cette semaine"
+            title="Pas encore d'activité"
             description="Synchronise Intervals.icu pour voir tes séances vélo/natation/course/muscu, comme sur Strava."
             action={
               <Button size="sm" onClick={handleSync} loading={syncing}>
@@ -497,50 +783,61 @@ export function DashboardContent() {
             }
           />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-surface-500 uppercase tracking-wider border-b border-surface-800">
-                  <th className="py-2 pr-3 font-medium">Sport</th>
-                  <th className="py-2 pr-3 font-medium">Séances</th>
-                  <th className="py-2 pr-3 font-medium">Distance</th>
-                  <th className="py-2 pr-3 font-medium">Durée</th>
-                  <th className="py-2 pr-3 font-medium">Allure / vitesse moy.</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.activitiesThisWeek.map((summary) => {
-                  const Icon = SPORT_ICON[summary.sport];
-                  return (
-                    <tr
-                      key={summary.sport}
-                      className="border-b border-surface-800/60 last:border-b-0"
-                    >
-                      <td className="py-2.5 pr-3">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-1.5 h-6 rounded-full ${SPORT_COLOR[summary.sport]}`} />
-                          <Icon className="w-4 h-4 text-surface-400" />
-                          <span className="text-surface-200">{SPORT_LABEL[summary.sport]}</span>
-                        </div>
-                      </td>
-                      <td className="py-2.5 pr-3 text-surface-300">{summary.sessions}</td>
-                      <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
-                        {formatKm(summary.totalDistanceKm)}
-                      </td>
-                      <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
-                        {formatDuration(summary.totalDurationMin)}
-                      </td>
-                      <td className="py-2.5 pr-3 text-surface-300 whitespace-nowrap">
-                        {formatActivityPace(summary)}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <WeekSessionsTable
+            activities={data.recentActivitiesTable}
+            thisWeek={data.activitiesThisWeek}
+            sportFilter={weekTableSportFilter}
+            onSportFilterChange={setWeekTableSportFilter}
+          />
+        )}
+      </Card>
+
+      {/* 5 dernières activités toutes catégories, puis par catégorie (vélo,
+          natation, course, sports de raquette...) — à partir des Activity
+          synchronisées (Intervals.icu), indépendamment des séances planifiées. */}
+      <Card padding="lg">
+        <CardHeader>
+          <CardTitle>Activités récentes</CardTitle>
+        </CardHeader>
+        {data.recentActivities.length === 0 ? (
+          <EmptyState
+            icon={Activity}
+            title="Pas encore d'activité"
+            description="Synchronise Intervals.icu pour voir tes dernières activités ici."
+          />
+        ) : (
+          <div className="space-y-2">
+            {data.recentActivities.map((activity) => (
+              <ActivityRow key={activity.id} activity={activity} />
+            ))}
           </div>
         )}
       </Card>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {data.recentActivitiesByCategory.map((group) => (
+          <Card padding="lg" key={group.category}>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                {(() => {
+                  const Icon = ACTIVITY_CATEGORY_ICON[group.category];
+                  return <Icon className="w-4 h-4 text-surface-400" />;
+                })()}
+                <CardTitle>{group.label}</CardTitle>
+              </div>
+            </CardHeader>
+            {group.activities.length === 0 ? (
+              <p className="text-sm text-surface-500">Aucune activité récente.</p>
+            ) : (
+              <div className="space-y-2">
+                {group.activities.map((activity) => (
+                  <ActivityRow key={activity.id} activity={activity} />
+                ))}
+              </div>
+            )}
+          </Card>
+        ))}
+      </div>
 
       {/* Training load + next session */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -622,8 +919,8 @@ export function DashboardContent() {
           ) : (
             <EmptyState
               icon={Activity}
-              title="Pas encore de données"
-              description="Connecte Garmin pour suivre ta VO2max au fil du temps."
+              title="Pas encore de VO2max"
+              description="Garmin n'a pas encore calculé de VO2max pour ton compte — il faut plusieurs sorties course/vélo avec fréquence cardiaque sur un appareil compatible pour que l'estimation apparaisse."
             />
           )}
         </Card>

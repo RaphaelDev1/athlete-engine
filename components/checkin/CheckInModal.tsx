@@ -3,7 +3,7 @@
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useState } from "react";
-import { X, Save, Battery, Frown, Sparkles, Flame, Pizza } from "lucide-react";
+import { X, Save, Battery, Frown, Sparkles, Flame, Moon } from "lucide-react";
 import {
   checkInSchema,
   CheckInFormValues,
@@ -70,7 +70,7 @@ export function CheckInModal({ isOpen, onClose, onSave }: CheckInModalProps) {
   if (!isOpen) return null;
 
   const soreness = watch("soreness");
-  const badEating = watch("badEating");
+  const napTaken = watch("napTaken");
 
   const onSubmit = async (data: CheckInFormValues) => {
     setSaving(true);
@@ -103,6 +103,12 @@ export function CheckInModal({ isOpen, onClose, onSave }: CheckInModalProps) {
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="p-6 space-y-5">
+          <ScaleField
+            label="Sommeil"
+            icon={Moon}
+            value={watch("sleepQuality")}
+            onChange={(v) => setValue("sleepQuality", v, { shouldDirty: true })}
+          />
           <ScaleField
             label="Énergie"
             icon={Battery}
@@ -152,24 +158,37 @@ export function CheckInModal({ isOpen, onClose, onSave }: CheckInModalProps) {
             )}
           </div>
 
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Pizza className="w-4 h-4 text-brand-500" />
-              <span className="label !mb-0">Écart alimentaire (fast food...)</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setValue("badEating", !badEating, { shouldDirty: true })}
-              className={`relative w-11 h-6 rounded-full transition-colors ${
-                badEating ? "bg-brand-500" : "bg-surface-700"
-              }`}
-            >
-              <span
-                className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
-                  badEating ? "translate-x-5" : ""
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Moon className="w-4 h-4 text-brand-500" />
+                <span className="label !mb-0">Sieste (avant reprise du travail, etc.)</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setValue("napTaken", !napTaken, { shouldDirty: true })}
+                className={`relative w-11 h-6 rounded-full transition-colors ${
+                  napTaken ? "bg-brand-500" : "bg-surface-700"
                 }`}
-              />
-            </button>
+              >
+                <span
+                  className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                    napTaken ? "translate-x-5" : ""
+                  }`}
+                />
+              </button>
+            </div>
+            {napTaken && (
+              <div className="mt-3">
+                <Input
+                  type="number"
+                  min={0}
+                  max={240}
+                  placeholder="Durée (minutes)"
+                  {...register("napDurationMin")}
+                />
+              </div>
+            )}
           </div>
 
           <Textarea

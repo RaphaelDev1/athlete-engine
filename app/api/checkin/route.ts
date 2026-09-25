@@ -54,7 +54,9 @@ export async function POST(request: Request) {
         sorenessLocation: data.sorenessLocation,
         motivation: data.motivation,
         stress: data.stress,
-        badEating: data.badEating,
+        sleepQuality: data.sleepQuality,
+        napTaken: data.napTaken,
+        napDurationMin: data.napDurationMin,
         notes: data.notes,
       },
       create: {
@@ -65,7 +67,9 @@ export async function POST(request: Request) {
         sorenessLocation: data.sorenessLocation,
         motivation: data.motivation,
         stress: data.stress,
-        badEating: data.badEating,
+        sleepQuality: data.sleepQuality,
+        napTaken: data.napTaken,
+        napDurationMin: data.napDurationMin,
         notes: data.notes,
       },
     });

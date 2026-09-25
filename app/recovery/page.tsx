@@ -13,7 +13,7 @@ import {
 import { Card, CardHeader, CardTitle, Badge, Button, EmptyState } from "@/components/ui";
 import { HrvTrendChart } from "@/components/recovery/HrvTrendChart";
 import { SleepCorrelationChart, SleepCorrelationPoint } from "@/components/recovery/SleepCorrelationChart";
-import { ReadinessLevel } from "@/lib/engine/garminAdaptation";
+import { computeNapAdvice, NapSessionAdvice, ReadinessLevel } from "@/lib/engine/garminAdaptation";
 
 interface GarminSummary {
   connected: boolean;
@@ -26,6 +26,7 @@ interface GarminSummary {
       remSleepInSeconds?: number;
       awakeDurationInSeconds?: number;
       durationInSeconds?: number;
+      napDurationInSeconds?: number;
     };
   } | null;
   hrv: {
@@ -70,6 +71,18 @@ const LEVEL_LABEL: Record<ReadinessLevel, string> = {
   REST: "Repos conseillé",
 };
 
+const NAP_SESSION_LABEL: Record<NapSessionAdvice, string> = {
+  NORMAL_SESSION: "Séance normale possible",
+  SMALL_SESSION_OK: "Petite séance possible après la sieste",
+  REST_ONLY: "Pas de séance aujourd'hui",
+};
+
+const NAP_SESSION_BADGE: Record<NapSessionAdvice, "success" | "info" | "warning" | "danger"> = {
+  NORMAL_SESSION: "success",
+  SMALL_SESSION_OK: "info",
+  REST_ONLY: "warning",
+};
+
 function formatDuration(seconds?: number): string {
   if (!seconds) return "—";
   const h = Math.floor(seconds / 3600);
@@ -92,44 +105,90 @@ function dbDateKey(value: string | Date): string {
   return new Date(value).toISOString().slice(0, 10);
 }
 
+interface NapEntry {
+  date: string;
+  minutes: number | null;
+  source: "garmin" | "declaree";
+}
+
 function RecoveryContent() {
   const [status, setStatus] = useState<GarminStatus | null>(null);
   const [summary, setSummary] = useState<GarminSummary | null>(null);
   const [correlation, setCorrelation] = useState<SleepCorrelationPoint[]>([]);
+  const [naps, setNaps] = useState<NapEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
   async function loadData() {
     setLoading(true);
-    const [statusRes, summaryRes, sleep30Res, checkinRes] = await Promise.all([
+    const [statusRes, summaryRes, sleep30Res, checkinRes, nutrition30Res] = await Promise.all([
       fetch("/api/garmin/status"),
       fetch("/api/garmin/summary"),
       fetch("/api/garmin/summary?days=30"),
       fetch("/api/checkin"),
+      fetch("/api/nutrition/day?days=30"),
     ]);
     setStatus(await statusRes.json());
     setSummary(await summaryRes.json());
 
-    const sleep30: { sleepTrend?: { date: string; value: number | null }[] } = await sleep30Res.json();
+    const sleep30: {
+      sleepTrend?: { date: string; value: number | null; napMinutes: number | null }[];
+      stressTrend?: { date: string; value: number | null }[];
+    } = await sleep30Res.json();
     const checkin: {
-      history?: { date: string; stress: number; badEating: boolean }[];
+      history?: {
+        date: string;
+        stress: number;
+        sleepQuality: number | null;
+        napTaken: boolean;
+        napDurationMin: number | null;
+      }[];
     } = await checkinRes.json();
+    const nutrition30: {
+      history?: { date: string; badEating: boolean }[];
+    } = await nutrition30Res.json();
 
-    const sleepByDate = new Map((sleep30.sleepTrend ?? []).map((d) => [dbDateKey(d.date), d.value]));
+    const sleepByDate = new Map((sleep30.sleepTrend ?? []).map((d) => [dbDateKey(d.date), d]));
+    const stressByDate = new Map((sleep30.stressTrend ?? []).map((d) => [dbDateKey(d.date), d]));
     const checkinByDate = new Map((checkin.history ?? []).map((c) => [dbDateKey(c.date), c]));
+    const badEatingByDate = new Map(
+      (nutrition30.history ?? []).map((n) => [dbDateKey(n.date), n.badEating])
+    );
     const dates = Array.from(
-      new Set([...Array.from(sleepByDate.keys()), ...Array.from(checkinByDate.keys())])
+      new Set([
+        ...Array.from(sleepByDate.keys()),
+        ...Array.from(stressByDate.keys()),
+        ...Array.from(checkinByDate.keys()),
+        ...Array.from(badEatingByDate.keys()),
+      ])
     ).sort();
 
+    // Une sieste peut venir de Garmin (napMinutes) ou d'une déclaration
+    // manuelle au check-in (napTaken/napDurationMin) — les deux sont
+    // indépendantes (Garmin peut manquer une sieste hors capteur), donc on
+    // les additionne plutôt que de n'en garder qu'une.
+    const napEntries: NapEntry[] = [];
     setCorrelation(
-      dates.map((date) => ({
-        date,
-        sleepScore: sleepByDate.get(date) ?? null,
-        stress: checkinByDate.get(date)?.stress ?? null,
-        badEating: checkinByDate.get(date)?.badEating ?? false,
-      }))
+      dates.map((date) => {
+        const garminDay = sleepByDate.get(date);
+        const checkinDay = checkinByDate.get(date);
+        const garminNap = garminDay?.napMinutes ?? null;
+        const declaredNap = checkinDay?.napTaken ? checkinDay.napDurationMin ?? 0 : null;
+        if (garminNap) napEntries.push({ date, minutes: garminNap, source: "garmin" });
+        if (declaredNap !== null) napEntries.push({ date, minutes: declaredNap || null, source: "declaree" });
+        const napMinutes = (garminNap ?? 0) + (declaredNap ?? 0);
+
+        return {
+          date,
+          sleepScore: garminDay?.value ?? null,
+          napMinutes: napMinutes > 0 ? napMinutes : null,
+          stressScore: stressByDate.get(date)?.value ?? null,
+          badEating: badEatingByDate.get(date) ?? false,
+        };
+      })
     );
+    setNaps(napEntries.sort((a, b) => (a.date < b.date ? 1 : -1)));
 
     setLoading(false);
   }
@@ -212,7 +271,9 @@ function RecoveryContent() {
           <CardHeader>
             <CardTitle>Sommeil vs stress vs écarts alimentaires — 30 jours</CardTitle>
           </CardHeader>
-          {correlation.some((d) => d.sleepScore !== null || d.stress !== null) ? (
+          {correlation.some(
+            (d) => d.sleepScore !== null || d.stressScore !== null
+          ) ? (
             <SleepCorrelationChart data={correlation} />
           ) : (
             <p className="text-sm text-surface-500">
@@ -220,6 +281,33 @@ function RecoveryContent() {
               pour voir apparaître les liens entre sommeil, stress et alimentation.
             </p>
           )}
+        </Card>
+      )}
+
+      {!loading && naps.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Siestes — 30 jours</CardTitle>
+          </CardHeader>
+          <p className="text-xs text-surface-500 mb-3">
+            {naps.length} sieste{naps.length > 1 ? "s" : ""} · total{" "}
+            {formatDuration(naps.reduce((sum, n) => sum + (n.minutes ?? 0) * 60, 0))}
+          </p>
+          <ul className="space-y-1.5">
+            {naps.map((nap, i) => (
+              <li
+                key={`${nap.date}-${nap.source}-${i}`}
+                className="flex items-center justify-end gap-2 text-sm"
+              >
+                <span className="text-surface-100 tabular-nums">
+                  {nap.minutes != null ? `${nap.minutes} min` : "—"}
+                </span>
+                <Badge variant={nap.source === "garmin" ? "info" : "success"}>
+                  {nap.source === "garmin" ? "Garmin" : "Déclarée"}
+                </Badge>
+              </li>
+            ))}
+          </ul>
         </Card>
       )}
 
@@ -249,6 +337,28 @@ function RecoveryContent() {
                 </li>
               ))}
             </ul>
+            {(() => {
+              const durationSec = summary.sleep?.payload.durationInSeconds;
+              const napAdvice = computeNapAdvice({
+                sleepDurationMin: durationSec ? Math.round(durationSec / 60) : null,
+                bodyBattery: summary.bodyBattery?.value ?? null,
+                recoveryLevel: summary.recoveryStatus.level,
+              });
+              return (
+                <div className="mt-3 pt-3 border-t border-surface-800 flex items-start gap-2.5">
+                  <Moon className="w-4 h-4 text-brand-500 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="text-xs text-surface-300">{napAdvice.message}</p>
+                    <Badge
+                      variant={NAP_SESSION_BADGE[napAdvice.sessionAdvice]}
+                      className="mt-1.5"
+                    >
+                      {NAP_SESSION_LABEL[napAdvice.sessionAdvice]}
+                    </Badge>
+                  </div>
+                </div>
+              );
+            })()}
           </Card>
 
           {/* Stats principales */}
@@ -347,6 +457,14 @@ function RecoveryContent() {
                       </div>
                     );
                   })}
+                  {(summary.sleep?.payload.napDurationInSeconds ?? 0) > 0 && (
+                    <div className="pt-2 mt-2 border-t border-surface-800">
+                      <div className="flex justify-between text-xs text-surface-400 mb-1">
+                        <span>Sieste</span>
+                        <span>{formatDuration(summary.sleep?.payload.napDurationInSeconds)}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <p className="text-sm text-surface-500">Pas encore de donnée de sommeil.</p>

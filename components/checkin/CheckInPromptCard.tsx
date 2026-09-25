@@ -1,4 +1,4 @@
-import { ClipboardCheck, Battery, Sparkles, Flame, Frown, Pizza } from "lucide-react";
+import { ClipboardCheck, Battery, Sparkles, Flame, Frown } from "lucide-react";
 import { Card, Button } from "@/components/ui";
 
 interface CheckIn {
@@ -6,7 +6,6 @@ interface CheckIn {
   motivation: number;
   stress: number;
   soreness: boolean;
-  badEating: boolean;
 }
 
 interface CheckInPromptCardProps {
@@ -49,11 +48,6 @@ export function CheckInPromptCard({ checkIn, onOpen }: CheckInPromptCardProps) {
             icon={Frown}
             label="Douleurs"
             value={checkIn.soreness ? "Oui" : "Non"}
-          />
-          <MiniStat
-            icon={Pizza}
-            label="Écart alim."
-            value={checkIn.badEating ? "Oui" : "Non"}
           />
         </div>
         <Button size="sm" variant="ghost" onClick={onOpen}>

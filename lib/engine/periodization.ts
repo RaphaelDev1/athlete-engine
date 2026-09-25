@@ -8,7 +8,7 @@
 // Musculation : blocs hypertrophie → force → peaking sur le mésocycle, combinés
 // à une ondulation quotidienne (DUP) lourd/modéré/léger au sein de chaque semaine.
 
-import { ExperienceLevel, SessionType, WeekType } from "@/lib/types";
+import { ExperienceLevel, SessionType, Sport, WeekType } from "@/lib/types";
 import { computeAthleteZones } from "./zones";
 import {
   buildEasyRun,
@@ -498,6 +498,112 @@ function remapToAvailableDays(sessions: GeneratedSession[], weekStart: Date, sor
   }
 }
 
+// ─── Montée en charge du nombre de séances/semaine ───────────────────────────
+//
+// Reprise prudente : peu importe le nombre de séances que le template du
+// goalType/macroPhase voudrait poser cette semaine-là, on démarre à 3
+// séances/semaine et on augmente d'une séance tous les
+// SESSION_RAMP_STEP_WEEKS, jusqu'à un plafond. Indépendant d'availableDays
+// (lib/training/materialize.ts appelle toujours generateTrainingPlan avec les
+// 7 jours ouverts — la vraie contrainte de jours dispo/travail vit dans
+// WorkSchedule + lib/training/dayPlanner.ts) : ce plafond porte uniquement sur
+// le VOLUME de séances produit, pas sur leur placement.
+const SESSION_RAMP_START = 3;
+const SESSION_RAMP_STEP_WEEKS = 3;
+const SESSION_RAMP_MAX = 6;
+
+function computeWeeklySessionTarget(weekNumber: number): number {
+  return Math.min(
+    SESSION_RAMP_MAX,
+    SESSION_RAMP_START + Math.floor((weekNumber - 1) / SESSION_RAMP_STEP_WEEKS)
+  );
+}
+
+// Rang indicatif d'une séance dans l'arbitrage de capWeeklySessions — les
+// tests de forme et la séance clé de la semaine (sortie longue, course,
+// brick) doivent survivre au cap avant les séances de fond/technique.
+const SESSION_PRIORITY: Partial<Record<SessionType, number>> = {
+  RACE: 100,
+  FITNESS_TEST: 95,
+  BRICK: 90,
+  LONG_RUN: 85,
+  INTERVALS: 75,
+  TEMPO: 75,
+  INTERVAL_RIDE: 75,
+  TEMPO_RIDE: 75,
+  SWIM_RACE_PACE: 70,
+  OPEN_WATER: 70,
+  ENDURANCE_RIDE: 60,
+  SWIM_ENDURANCE: 60,
+  FULL_BODY: 55,
+  UPPER_BODY: 55,
+  LOWER_BODY: 55,
+  PUSH: 55,
+  PULL: 55,
+  LEGS: 55,
+  HILLS: 50,
+  FARTLEK: 50,
+  HOME_CIRCUIT: 45,
+  EASY_RUN: 40,
+  RECOVERY_RUN: 35,
+  SWIM_TECHNIQUE: 35,
+  CUSTOM: 30,
+};
+
+function sessionPriority(session: GeneratedSession): number {
+  return SESSION_PRIORITY[session.sessionType] ?? 30;
+}
+
+/**
+ * Réduit `sessions` à `target` séances en mutant le tableau en place. Garde
+ * d'abord la meilleure séance de chaque sport représenté (diversité — un cap
+ * serré à 3 ne doit pas ne garder que de la muscu), puis complète avec les
+ * séances restantes les plus prioritaires. Un enchaînement brick (deux
+ * séances, `isBrickLeg`) est traité comme un seul bloc indivisible.
+ */
+function capWeeklySessions(sessions: GeneratedSession[], target: number): void {
+  if (target <= 0 || sessions.length <= target) return;
+
+  const groups = new Map<string, GeneratedSession[]>();
+  for (const s of sessions) {
+    const key = s.isBrickLeg ? `brick-${s.dayOfWeek}` : s.id;
+    const list = groups.get(key) ?? [];
+    list.push(s);
+    groups.set(key, list);
+  }
+  const groupList = Array.from(groups.values());
+  const groupPriority = (g: GeneratedSession[]) => Math.max(...g.map(sessionPriority));
+
+  const bestBySport = new Map<Sport, GeneratedSession[]>();
+  for (const group of groupList) {
+    const sport = group[0].sport;
+    const current = bestBySport.get(sport);
+    if (!current || groupPriority(group) > groupPriority(current)) bestBySport.set(sport, group);
+  }
+
+  const picked = new Set<GeneratedSession[]>();
+  const kept: GeneratedSession[] = [];
+  const diverse = Array.from(bestBySport.values()).sort(
+    (a, b) => groupPriority(b) - groupPriority(a)
+  );
+  for (const group of diverse) {
+    if (kept.length >= target) break;
+    picked.add(group);
+    kept.push(...group);
+  }
+
+  const rest = groupList
+    .filter((g) => !picked.has(g))
+    .sort((a, b) => groupPriority(b) - groupPriority(a));
+  for (const group of rest) {
+    if (kept.length >= target) break;
+    kept.push(...group);
+  }
+
+  sessions.length = 0;
+  sessions.push(...kept);
+}
+
 function applyAvailability(
   sessions: GeneratedSession[],
   weekStart: Date,
@@ -596,7 +702,7 @@ function buildTestSchedule(totalWeeks: number): Map<number, TestKind[]> {
     if (!list.includes(kind)) list.push(kind);
     schedule.set(idx, list);
   };
-  add(2, "LUC_LEGER"); // baseline
+  add(7, "LUC_LEGER"); // baseline — jamais avant S6 (Phase 1 = zéro test)
   add(7, "ONE_RM");
   add(8, "SWIM_400");
   add(14, "LUC_LEGER"); // intermédiaire
@@ -722,22 +828,29 @@ function buildTriathlonWeekSessions(input: TriathlonWeekInput): GeneratedSession
     return sessions;
   }
 
+  // Reconditionnement : poids du corps à la maison le premier mois (S1-S4),
+  // passage en salle à partir de S5 (voir programme 6 mois, Phase 1).
+  const isEarlyRecon = macroPhase === "RECONDITIONING" && weekNumber <= 4;
+
   let strengthDayCount = 0;
   const strengthDay = (
     focus: StrengthFocus,
     dayOfWeek: number,
     opts: { isTest?: boolean } = {}
   ) => {
+    const dayVariant = VARIANT_ROTATION[strengthDayCount % VARIANT_ROTATION.length];
     const built =
       opts.isTest && hasTest("ONE_RM")
         ? buildOneRMTest(oneRMs)
+        : isEarlyRecon
+        ? buildHomeBodyweightStrength({ weekType, dayVariant })
         : buildStrengthSession({
             phase: strengthPhase,
             focus,
             oneRMs,
             weekType,
             experienceLevel,
-            dayVariant: VARIANT_ROTATION[strengthDayCount % VARIANT_ROTATION.length],
+            dayVariant,
           });
     strengthDayCount++;
     push(built, dayOfWeek);
@@ -947,6 +1060,14 @@ function generateTriathlonWeeks(input: PeriodizationInput, zones: AthleteZones):
       tests,
     });
 
+    // Phase 1 (Reconditionnement) : jamais plus de 4 séances/semaine, même si
+    // la montée en charge globale (computeWeeklySessionTarget) autoriserait
+    // plus — le corps a besoin de temps pour se réadapter après une coupure.
+    const sessionTarget =
+      macroPhase === "RECONDITIONING"
+        ? Math.min(4, computeWeeklySessionTarget(weekNumber))
+        : computeWeeklySessionTarget(weekNumber);
+    capWeeklySessions(sessions, sessionTarget);
     applyAvailability(sessions, weekStart, input.availableDays, input.weeklyTimeBudgetMin);
 
     if (input.raceDate) {
@@ -1058,6 +1179,7 @@ export function generateTrainingPlan(input: PeriodizationInput): GeneratedPlan {
       );
     }
 
+    capWeeklySessions(sessions, computeWeeklySessionTarget(weekNumber));
     applyAvailability(sessions, weekStart, input.availableDays, input.weeklyTimeBudgetMin);
 
     if (input.raceDate && targetVolume !== null) {

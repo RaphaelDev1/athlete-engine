@@ -101,3 +101,74 @@ export function computeRecoveryStatus(signals: RecoverySignals): RecoveryStatus 
 
   return { level, loadMultiplier: LEVEL_MULTIPLIER[level], reasons };
 }
+
+// ─── Sieste conseillée ────────────────────────────────────────────────────
+// Pas de valeur "besoin de sommeil" personnalisée remontée par Garmin (les
+// montres grand public ne l'exposent pas via l'API Connect) : on compare donc
+// la nuit à un objectif standard de 7h30, et la sieste conseillée comble ce
+// manque — bornée pour rester une vraie sieste (20-90 min) plutôt qu'un
+// deuxième cycle de sommeil qui perturberait la nuit suivante.
+const SLEEP_TARGET_MIN = 450; // 7h30
+const MIN_NAP_MIN = 20;
+const MAX_NAP_MIN = 90;
+const BODY_BATTERY_OK_THRESHOLD = 50;
+
+export type NapSessionAdvice = "NORMAL_SESSION" | "SMALL_SESSION_OK" | "REST_ONLY";
+
+export interface NapAdviceInput {
+  sleepDurationMin: number | null;
+  bodyBattery: number | null; // 0-100
+  recoveryLevel: ReadinessLevel;
+}
+
+export interface NapAdvice {
+  recommendedNapMin: number | null; // null = pas de sieste nécessaire
+  sessionAdvice: NapSessionAdvice;
+  message: string;
+}
+
+/**
+ * Conseille une durée de sieste proportionnelle à la dette de sommeil de la
+ * nuit, puis statue sur la séance du jour : si la sieste comble le manque et
+ * que la Body Battery suit, une petite séance reste possible ; sinon, repos.
+ */
+export function computeNapAdvice({
+  sleepDurationMin,
+  bodyBattery,
+  recoveryLevel,
+}: NapAdviceInput): NapAdvice {
+  const deficit = sleepDurationMin !== null ? SLEEP_TARGET_MIN - sleepDurationMin : 0;
+
+  if (deficit <= 0) {
+    return {
+      recommendedNapMin: null,
+      sessionAdvice: recoveryLevel === "REST" ? "REST_ONLY" : "NORMAL_SESSION",
+      message: "Sommeil suffisant cette nuit — pas de sieste nécessaire.",
+    };
+  }
+
+  const recommendedNapMin =
+    Math.round(Math.min(MAX_NAP_MIN, Math.max(MIN_NAP_MIN, deficit)) / 5) * 5;
+
+  if (recoveryLevel === "REST") {
+    return {
+      recommendedNapMin,
+      sessionAdvice: "REST_ONLY",
+      message: `Dette de sommeil importante — sieste de ${recommendedNapMin} min conseillée, repos complet aujourd'hui.`,
+    };
+  }
+
+  if (bodyBattery !== null && bodyBattery >= BODY_BATTERY_OK_THRESHOLD) {
+    return {
+      recommendedNapMin,
+      sessionAdvice: "SMALL_SESSION_OK",
+      message: `Sieste de ${recommendedNapMin} min conseillée — Body Battery correcte, une petite séance reste possible ensuite.`,
+    };
+  }
+
+  return {
+    recommendedNapMin,
+    sessionAdvice: "REST_ONLY",
+    message: `Sieste de ${recommendedNapMin} min conseillée — Body Battery basse, mieux vaut lever le pied aujourd'hui.`,
+  };
+}

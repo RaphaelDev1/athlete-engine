@@ -106,10 +106,18 @@ export function applySmartDayAssignment(input: SmartDayAssignmentInput): void {
   const { weeks, windowStart, windowEnd, availability } = input;
 
   const sessionsInWindow: GeneratedSession[] = [];
+  // Semaine d'origine de chaque séance (avant retrait ci-dessous) — sert de
+  // préférence souple dans scoreCandidate pour éviter que le pool sur 28 jours
+  // ne fasse déborder plusieurs semaines de séances les unes sur les autres :
+  // le nombre de séances/semaine monte progressivement en début de plan
+  // (lib/engine/periodization.ts::computeWeeklySessionTarget), un mélange
+  // aveugle des 4 semaines du pool annulerait cette montée en charge.
+  const originalWeekOf = new Map<string, GeneratedWeek>();
   for (const week of weeks) {
     for (const session of week.sessions) {
       if (isInWindow(session.scheduledDate, windowStart, windowEnd)) {
         sessionsInWindow.push(session);
+        originalWeekOf.set(session.id, week);
       }
     }
   }
@@ -163,6 +171,12 @@ export function applySmartDayAssignment(input: SmartDayAssignmentInput): void {
     if (isBig && hasBigAlready) score -= 1000;
     if (day.length === 0) score += 20;
     if (!conflictsWithNeighbor) score += 10;
+    // Préférence souple pour rester dans la semaine d'origine du générateur
+    // (montée en charge progressive du nombre de séances/semaine) — dépassée
+    // uniquement si cette semaine n'a plus de place (cf. filtre `withRoom` de
+    // pickBestDay), jamais au prix de perdre une séance.
+    const candidateWeek = weekContaining(weeks, availableDates[idx]);
+    if (candidateWeek && candidateWeek === originalWeekOf.get(session.id)) score += 30;
     score -= day.length; // départage : le moins chargé d'abord
     return score;
   }

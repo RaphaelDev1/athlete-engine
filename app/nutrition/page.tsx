@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Apple, Beef, Flame, Wheat, Droplet, Target } from "lucide-react";
-import { Card, CardHeader, CardTitle, Badge, Select, StatCard } from "@/components/ui";
+import { Apple, Beef, Flame, Wheat, Droplet, Target, NotebookPen, Pizza, Activity as ActivityIcon } from "lucide-react";
+import { Card, CardHeader, CardTitle, Badge, Select, StatCard, Textarea, Input } from "@/components/ui";
 import {
   buildMealPlan,
   calculateDayNutrition,
@@ -12,8 +12,11 @@ import {
 import { GoalDirection } from "@/lib/engine/types";
 import { MacroDonut } from "@/components/nutrition/MacroDonut";
 import { SessionCard } from "@/components/training/SessionCard";
-import { DAY_LABELS, SessionCardData } from "@/components/training/sessionMeta";
+import { SessionCardData } from "@/components/training/sessionMeta";
 import { ProfileFormValues } from "@/lib/validations/profile";
+import { ActivityListItem } from "@/components/history/ActivityListItem";
+import { byCategory } from "@/lib/training/activityDisplay";
+import { HistoryDayActivity } from "@/app/api/history/route";
 
 // Repli tant que le profil n'est pas encore renseigné dans /profil.
 const FALLBACK_BIOMETRICS: BMRInput = {
@@ -69,9 +72,10 @@ const DAY_LOAD_LABELS: Record<string, { label: string; variant: "default" | "bra
   LONG: { label: "Longue", variant: "warning" },
 };
 
-function currentDayOfWeek(): number {
-  const jsDay = new Date().getDay(); // 0 = dimanche
-  return jsDay === 0 ? 6 : jsDay - 1;
+function startOfToday(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
 }
 
 function addDays(date: Date, days: number): Date {
@@ -89,18 +93,58 @@ function toDateKey(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+function formatDayButton(date: Date): { weekday: string; dayMonth: string } {
+  const weekday = new Intl.DateTimeFormat("fr-FR", { weekday: "short" }).format(date).replace(".", "");
+  const dayMonth = new Intl.DateTimeFormat("fr-FR", { day: "2-digit", month: "2-digit" }).format(date);
+  return { weekday: weekday.charAt(0).toUpperCase() + weekday.slice(1), dayMonth };
+}
+
+function formatFullDate(date: Date): string {
+  const label = new Intl.DateTimeFormat("fr-FR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  }).format(date);
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+// 14 jours, dates réelles : les 7 premiers = la semaine passée, les 7
+// suivants commencent au jour présent (index 7 = aujourd'hui) — remplace
+// l'ancien sélecteur à 7 boutons "Lundi..Dimanche" qui ne couvrait que la
+// semaine du plan actuellement affichée.
+const DAY_WINDOW_BEFORE = 7;
+const DAY_WINDOW_TOTAL = 14;
+const TODAY_INDEX = DAY_WINDOW_BEFORE;
+
 export default function NutritionPage() {
   const [manualGoalDirection, setManualGoalDirection] = useState<GoalDirection>("MAINTENANCE");
-  const [selectedDay, setSelectedDay] = useState<number>(() => currentDayOfWeek());
+  const [selectedDayIndex, setSelectedDayIndex] = useState<number>(TODAY_INDEX);
   const [profileForm, setProfileForm] = useState<ProfileFormValues | null>(null);
   const [compositionGoal, setCompositionGoal] = useState<CompositionGoal | null>(null);
-  const [week, setWeek] = useState<PlanWeekLite | null>(null);
+  const [weeks, setWeeks] = useState<PlanWeekLite[]>([]);
   const [actualActiveKcal, setActualActiveKcal] = useState<number | null>(null);
+  const [intakeNotes, setIntakeNotes] = useState("");
+  const [intakeNotesSaving, setIntakeNotesSaving] = useState(false);
+  const [actualCalories, setActualCalories] = useState("");
+  const [actualCaloriesSaving, setActualCaloriesSaving] = useState(false);
+  const [badEating, setBadEating] = useState(false);
+  const [dayActivities, setDayActivities] = useState<HistoryDayActivity[]>([]);
+
+  const days = useMemo(() => {
+    const today = startOfToday();
+    return Array.from({ length: DAY_WINDOW_TOTAL }, (_, i) => addDays(today, i - DAY_WINDOW_BEFORE));
+  }, []);
 
   useEffect(() => {
     fetch("/api/profile")
       .then((res) => res.json())
-      .then(({ data }) => setProfileForm(data ?? null))
+      .then(({ data }) => {
+        setProfileForm(data ?? null);
+        // Objectif de poids choisi sur le profil (perte/maintien/prise) —
+        // sert de repli par défaut tant qu'aucun objectif de composition
+        // corporelle actif ne prend le relais (cf. goalDirection ci-dessous).
+        if (data?.weightGoalDirection) setManualGoalDirection(data.weightGoalDirection);
+      })
       .catch(() => setProfileForm(null));
 
     fetch("/api/goals")
@@ -113,16 +157,8 @@ export default function NutritionPage() {
 
     fetch("/api/training/plan")
       .then((res) => res.json())
-      .then(({ data }) => {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const current =
-          (data?.weeks ?? []).find(
-            (w: PlanWeekLite) => new Date(w.startDate) <= today && today <= new Date(w.endDate)
-          ) ?? data?.weeks?.[0] ?? null;
-        setWeek(current);
-      })
-      .catch(() => setWeek(null));
+      .then(({ data }) => setWeeks(data?.weeks ?? []))
+      .catch(() => setWeeks([]));
   }, []);
 
   const biometrics = useMemo(() => toBiometrics(profileForm), [profileForm]);
@@ -137,14 +173,21 @@ export default function NutritionPage() {
   }, [compositionGoal, profileForm]);
 
   const goalDirection = weightGoal?.direction ?? manualGoalDirection;
-  const daySessions = useMemo(
-    () => (week ? week.sessions.filter((s) => s.dayOfWeek === selectedDay) : []),
-    [week, selectedDay]
+
+  // Toutes les séances du plan (toutes semaines confondues), pour matcher par
+  // date calendaire réelle plutôt que par index de jour — un session.dayOfWeek
+  // n'est fiable que si week.startDate tombe un lundi, ce qui casse dès qu'un
+  // report de plan (shiftDays) s'accumule (cf. app/training/page.tsx).
+  const allSessions = useMemo(
+    () => weeks.flatMap((w) => w.sessions.map((s) => ({ ...s, scheduledDate: new Date(s.scheduledDate) }))),
+    [weeks]
   );
 
-  const selectedDayDate = useMemo(
-    () => (week ? addDays(new Date(week.startDate), selectedDay) : null),
-    [week, selectedDay]
+  const selectedDayDate = days[selectedDayIndex];
+
+  const daySessions = useMemo(
+    () => allSessions.filter((s) => toDateKey(s.scheduledDate) === toDateKey(selectedDayDate)),
+    [allSessions, selectedDayDate]
   );
 
   // Calories actives réelles remontées par la montre pour le jour affiché
@@ -159,6 +202,32 @@ export default function NutritionPage() {
       .then((res) => res.json())
       .then(({ activeCalories }) => setActualActiveKcal(activeCalories ?? null))
       .catch(() => setActualActiveKcal(null));
+  }, [selectedDayDate]);
+
+  // Note libre "qu'est-ce que j'ai mangé en gros" + calories réellement
+  // consommées du jour affiché — chargées depuis la sauvegarde précédente
+  // (jamais recalculées comme les cibles macros).
+  useEffect(() => {
+    setIntakeNotes("");
+    setActualCalories("");
+    setBadEating(false);
+    setDayActivities([]);
+    if (!selectedDayDate) return;
+    const key = toDateKey(selectedDayDate);
+    fetch(`/api/nutrition/day?date=${key}`)
+      .then((res) => res.json())
+      .then(({ data, activities }) => {
+        setIntakeNotes(data?.actualIntakeNotes ?? "");
+        setActualCalories(data?.actualCalories != null ? String(data.actualCalories) : "");
+        setBadEating(data?.badEating ?? false);
+        setDayActivities(activities ?? []);
+      })
+      .catch(() => {
+        setIntakeNotes("");
+        setActualCalories("");
+        setBadEating(false);
+        setDayActivities([]);
+      });
   }, [selectedDayDate]);
 
   const nutrition = useMemo(
@@ -180,8 +249,11 @@ export default function NutritionPage() {
   const mealPlan = useMemo(() => buildMealPlan(nutrition, nutrition.dayLoad), [nutrition]);
 
   // Historise la cible du jour affiché (Phase 4/6) — jusqu'ici jamais persistée.
+  // Attend que le plan soit chargé (weeks.length > 0) pour ne pas écraser la
+  // cible avec un isTrainingDay/trainingType calculé sur une liste de séances
+  // encore vide pendant le chargement initial.
   useEffect(() => {
-    if (!week || !selectedDayDate) return;
+    if (weeks.length === 0 || !selectedDayDate) return;
     const dayDate = selectedDayDate;
     fetch("/api/nutrition/day", {
       method: "POST",
@@ -199,10 +271,86 @@ export default function NutritionPage() {
       }),
     }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [week, selectedDay, nutrition.calories]);
+  }, [weeks, selectedDayIndex, nutrition.calories]);
+
+  function saveIntakeNotes() {
+    if (!selectedDayDate) return;
+    setIntakeNotesSaving(true);
+    fetch("/api/nutrition/day", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: toDateKey(selectedDayDate),
+        bmr: nutrition.bmr,
+        tdee: nutrition.tdee,
+        protein: nutrition.protein,
+        carbs: nutrition.carbs,
+        fat: nutrition.fat,
+        calories: nutrition.calories,
+        isTrainingDay: daySessions.some((s) => s.sport !== "REST"),
+        trainingType: nutrition.dayLoad,
+        actualIntakeNotes: intakeNotes.trim() || null,
+      }),
+    })
+      .catch(() => {})
+      .finally(() => setIntakeNotesSaving(false));
+  }
+
+  function toggleBadEating() {
+    if (!selectedDayDate) return;
+    const next = !badEating;
+    setBadEating(next);
+    fetch("/api/nutrition/day", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: toDateKey(selectedDayDate),
+        bmr: nutrition.bmr,
+        tdee: nutrition.tdee,
+        protein: nutrition.protein,
+        carbs: nutrition.carbs,
+        fat: nutrition.fat,
+        calories: nutrition.calories,
+        isTrainingDay: daySessions.some((s) => s.sport !== "REST"),
+        trainingType: nutrition.dayLoad,
+        badEating: next,
+      }),
+    }).catch(() => {});
+  }
+
+  function saveActualCalories() {
+    if (!selectedDayDate) return;
+    setActualCaloriesSaving(true);
+    fetch("/api/nutrition/day", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        date: toDateKey(selectedDayDate),
+        bmr: nutrition.bmr,
+        tdee: nutrition.tdee,
+        protein: nutrition.protein,
+        carbs: nutrition.carbs,
+        fat: nutrition.fat,
+        calories: nutrition.calories,
+        isTrainingDay: daySessions.some((s) => s.sport !== "REST"),
+        trainingType: nutrition.dayLoad,
+        actualCalories: actualCalories.trim() === "" ? null : Number(actualCalories),
+      }),
+    })
+      .catch(() => {})
+      .finally(() => setActualCaloriesSaving(false));
+  }
 
   const dayLoadInfo = DAY_LOAD_LABELS[nutrition.dayLoad];
   const proteinPerKg = Math.round((nutrition.protein / biometrics.weightKg) * 10) / 10;
+  // Écart réel vs objectif du jour — négatif = mangé moins que la cible
+  // (déficit), positif = surplus. Répond directement à "suis-je en déficit
+  // ou non aujourd'hui ?".
+  const actualCaloriesNumber = actualCalories.trim() === "" ? null : Number(actualCalories);
+  const calorieDelta =
+    actualCaloriesNumber !== null && !Number.isNaN(actualCaloriesNumber)
+      ? Math.round(actualCaloriesNumber - nutrition.calories)
+      : null;
 
   return (
     <div className="space-y-6">
@@ -239,7 +387,10 @@ export default function NutritionPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <Apple className="w-5 h-5 text-brand-500" />
-            <CardTitle>Journée</CardTitle>
+            <div>
+              <CardTitle>Journée</CardTitle>
+              <p className="text-xs text-surface-500 mt-0.5">{formatFullDate(selectedDayDate)}</p>
+            </div>
           </div>
           {!weightGoal && (
             <div className="w-64">
@@ -252,26 +403,47 @@ export default function NutritionPage() {
           )}
         </CardHeader>
 
-        <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
-          {DAY_LABELS.map((label, dayOfWeek) => {
-            const isActive = dayOfWeek === selectedDay;
-            const sessionsCount =
-              week?.sessions.filter((s) => s.dayOfWeek === dayOfWeek && s.sport !== "REST").length ?? 0;
-            return (
-              <button
-                key={dayOfWeek}
-                onClick={() => setSelectedDay(dayOfWeek)}
-                className={`flex flex-col items-center gap-1 py-2.5 rounded-lg border transition-colors ${
-                  isActive
-                    ? "border-brand-500 bg-brand-500/10 text-brand-400"
-                    : "border-surface-700 bg-surface-850 text-surface-400 hover:text-surface-200 hover:border-surface-600"
-                }`}
-              >
-                <span className="text-xs font-medium">{label.slice(0, 3)}</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-current opacity-0 data-[has-session=true]:opacity-100" data-has-session={sessionsCount > 0} />
-              </button>
-            );
-          })}
+        <div className="space-y-3">
+          <div>
+            <p className="text-[11px] text-surface-500 uppercase tracking-wider mb-1.5">
+              Semaine dernière
+            </p>
+            <div className="grid grid-cols-7 gap-2">
+              {days.slice(0, DAY_WINDOW_BEFORE).map((date, i) => (
+                <DayButton
+                  key={toDateKey(date)}
+                  date={date}
+                  isActive={i === selectedDayIndex}
+                  hasSession={allSessions.some(
+                    (s) => toDateKey(s.scheduledDate) === toDateKey(date) && s.sport !== "REST"
+                  )}
+                  onSelect={() => setSelectedDayIndex(i)}
+                />
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-[11px] text-surface-500 uppercase tracking-wider mb-1.5">
+              Cette semaine
+            </p>
+            <div className="grid grid-cols-7 gap-2">
+              {days.slice(DAY_WINDOW_BEFORE).map((date, i) => {
+                const index = i + DAY_WINDOW_BEFORE;
+                return (
+                  <DayButton
+                    key={toDateKey(date)}
+                    date={date}
+                    isActive={index === selectedDayIndex}
+                    isToday={index === TODAY_INDEX}
+                    hasSession={allSessions.some(
+                      (s) => toDateKey(s.scheduledDate) === toDateKey(date) && s.sport !== "REST"
+                    )}
+                    onSelect={() => setSelectedDayIndex(index)}
+                  />
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {daySessions.filter((s) => s.sport !== "REST").length > 0 && (
@@ -283,6 +455,62 @@ export default function NutritionPage() {
               ))}
           </div>
         )}
+      </Card>
+
+      {/* Activités réellement faites ce jour-là (Intervals.icu/Garmin) — tout
+          ce qui a été pratiqué, pas seulement ce qui était planifié (ex. padel
+          non prévu au programme). */}
+      {dayActivities.length > 0 && (
+        <Card padding="lg">
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <ActivityIcon className="w-5 h-5 text-brand-500" />
+              <CardTitle>Activités de la journée</CardTitle>
+            </div>
+          </CardHeader>
+          <div className="space-y-1.5">
+            {byCategory(dayActivities).map((a) => (
+              <ActivityListItem key={a.id} activity={a} />
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* Ce qui a été mangé, en gros */}
+      <Card padding="lg">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <NotebookPen className="w-5 h-5 text-brand-500" />
+            <CardTitle>Qu&apos;as-tu mangé ce jour-là ?</CardTitle>
+          </div>
+          {intakeNotesSaving && <span className="text-xs text-surface-500">Enregistrement…</span>}
+        </CardHeader>
+        <Textarea
+          placeholder="En gros : riz, poulet, légumes, un yaourt le soir..."
+          rows={3}
+          value={intakeNotes}
+          onChange={(e) => setIntakeNotes(e.target.value)}
+          onBlur={saveIntakeNotes}
+        />
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-surface-700">
+          <div className="flex items-center gap-2">
+            <Pizza className="w-4 h-4 text-brand-500" />
+            <span className="label !mb-0">Écart alimentaire (fast food...)</span>
+          </div>
+          <button
+            type="button"
+            onClick={toggleBadEating}
+            className={`relative w-11 h-6 rounded-full transition-colors ${
+              badEating ? "bg-brand-500" : "bg-surface-700"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                badEating ? "translate-x-5" : ""
+              }`}
+            />
+          </button>
+        </div>
       </Card>
 
       {/* Stats principales */}
@@ -315,6 +543,55 @@ export default function NutritionPage() {
           </div>
         </Card>
       </div>
+
+      {/* Calories réellement consommées — saisie manuelle comparée à
+          l'objectif calculé ci-dessus, pour savoir si la journée est
+          effectivement en déficit/surplus plutôt que théorique. */}
+      <Card padding="lg">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Flame className="w-5 h-5 text-brand-500" />
+            <CardTitle>Calories réellement consommées</CardTitle>
+          </div>
+          {actualCaloriesSaving && <span className="text-xs text-surface-500">Enregistrement…</span>}
+        </CardHeader>
+        <div className="flex flex-wrap items-end gap-6">
+          <div className="w-44">
+            <Input
+              label="Consommées ce jour-là"
+              type="number"
+              min={0}
+              step={10}
+              suffix="kcal"
+              value={actualCalories}
+              onChange={(e) => setActualCalories(e.target.value)}
+              onBlur={saveActualCalories}
+            />
+          </div>
+          {calorieDelta !== null && (
+            <div>
+              <p className="stat-label">Écart vs objectif ({nutrition.calories} kcal)</p>
+              <div className="flex items-center gap-2 mt-1.5">
+                <span
+                  className={`text-lg font-semibold tabular-nums ${
+                    calorieDelta > 0 ? "text-warning-400" : "text-success-400"
+                  }`}
+                >
+                  {calorieDelta > 0 ? "+" : ""}
+                  {calorieDelta} kcal
+                </span>
+                <Badge variant={calorieDelta > 0 ? "warning" : "success"}>
+                  {calorieDelta > 0
+                    ? "Au-dessus de l'objectif"
+                    : calorieDelta < 0
+                      ? "En déficit vs objectif"
+                      : "Pile à l'objectif"}
+                </Badge>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
 
       {/* Répartition macros */}
       <Card padding="lg">
@@ -384,6 +661,42 @@ export default function NutritionPage() {
         </div>
       </Card>
     </div>
+  );
+}
+
+function DayButton({
+  date,
+  isActive,
+  isToday,
+  hasSession,
+  onSelect,
+}: {
+  date: Date;
+  isActive: boolean;
+  isToday?: boolean;
+  hasSession: boolean;
+  onSelect: () => void;
+}) {
+  const { weekday, dayMonth } = formatDayButton(date);
+  return (
+    <button
+      onClick={onSelect}
+      className={`relative flex flex-col items-center gap-1 py-2.5 rounded-lg border transition-colors ${
+        isActive
+          ? "border-brand-500 bg-brand-500/10 text-brand-400"
+          : "border-surface-700 bg-surface-850 text-surface-400 hover:text-surface-200 hover:border-surface-600"
+      }`}
+    >
+      {isToday && (
+        <span className="absolute -top-1.5 -right-1.5 w-2 h-2 rounded-full bg-brand-500" title="Aujourd'hui" />
+      )}
+      <span className="text-xs font-medium">{weekday}</span>
+      <span className="text-[10px] text-surface-500">{dayMonth}</span>
+      <span
+        className="w-1.5 h-1.5 rounded-full bg-current opacity-0 data-[has-session=true]:opacity-100"
+        data-has-session={hasSession}
+      />
+    </button>
   );
 }
 

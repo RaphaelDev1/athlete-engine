@@ -150,12 +150,14 @@ export default function ProfilePage() {
 
         {garmin?.garminConnected ? (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
               <GarminMetric label="FC repos" value={garmin.restingHR !== null ? `${garmin.restingHR} bpm` : null} />
               <GarminMetric label="FC max" value={garmin.maxHR !== null ? `${garmin.maxHR} bpm` : null} hint="Max observé sur 12 mois" />
               <GarminMetric label="VO2max" value={garmin.vo2max !== null ? `${garmin.vo2max} ml/kg/min` : null} />
               <GarminMetric label="Allure seuil" value={garmin.thresholdPace ? `${garmin.thresholdPace}/km` : null} hint="Estimée depuis le VO2max" />
-              <GarminMetric label="Volume hebdo" value={garmin.weeklyVolume !== null ? `${garmin.weeklyVolume} km` : null} hint="7 derniers jours" />
+              <GarminMetric label="Volume hebdo course" value={garmin.weeklyVolumeRunning !== null ? `${garmin.weeklyVolumeRunning} km` : null} hint="7 derniers jours" />
+              <GarminMetric label="Volume hebdo vélo" value={garmin.weeklyVolumeCycling !== null ? `${garmin.weeklyVolumeCycling} km` : null} hint="7 derniers jours" />
+              <GarminMetric label="Volume hebdo natation" value={garmin.weeklyVolumeSwimming !== null ? `${garmin.weeklyVolumeSwimming} km` : null} hint="7 derniers jours" />
             </div>
             <p className="text-xs text-surface-500 mt-3">
               Synchronisé depuis Garmin le {formatSyncDate(garmin.lastSyncAt)} — ces valeurs ne se
@@ -232,6 +234,16 @@ export default function ProfilePage() {
               hint="Optionnel — affine les calculs"
               error={errors.bodyFatPct?.message}
               {...register("bodyFatPct")}
+            />
+            <Select
+              label="Objectif de poids"
+              options={[
+                { value: "DEFICIT", label: "Perdre du poids" },
+                { value: "MAINTENANCE", label: "Maintenir le poids" },
+                { value: "SURPLUS", label: "Prendre du poids" },
+              ]}
+              error={errors.weightGoalDirection?.message}
+              {...register("weightGoalDirection")}
             />
           </div>
         </Card>

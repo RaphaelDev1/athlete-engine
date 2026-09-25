@@ -6,7 +6,9 @@ export const checkInSchema = z.object({
   sorenessLocation: z.string().max(200).nullable().default(null),
   motivation: z.coerce.number().int().min(1).max(5),
   stress: z.coerce.number().int().min(1).max(5),
-  badEating: z.boolean().default(false),
+  sleepQuality: z.coerce.number().int().min(1).max(5),
+  napTaken: z.boolean().default(false),
+  napDurationMin: z.coerce.number().int().min(0).max(240).nullable().default(null),
   notes: z.string().max(500).nullable().default(null),
 });
 
@@ -18,6 +20,8 @@ export const defaultCheckInValues: CheckInFormValues = {
   sorenessLocation: null,
   motivation: 3,
   stress: 3,
-  badEating: false,
+  sleepQuality: 3,
+  napTaken: false,
+  napDurationMin: null,
   notes: null,
 };

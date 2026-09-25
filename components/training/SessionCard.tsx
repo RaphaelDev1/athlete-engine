@@ -1,5 +1,6 @@
 "use client";
 
+import { Pin } from "lucide-react";
 import { formatPace } from "@/lib/engine/zones";
 import { Badge } from "@/components/ui";
 import { formatDuration, SessionCardData, SPORT_COLOR, SPORT_ICON, STATUS_LABELS } from "./sessionMeta";
@@ -53,12 +54,27 @@ export function SessionCard<T extends SessionCardData>({
                 {STATUS_LABELS[session.status]?.label ?? session.status}
               </Badge>
             )}
+            {session.isPinned && (
+              <Pin
+                className="w-3 h-3 text-brand-500 flex-shrink-0"
+                aria-label="Placée manuellement"
+              />
+            )}
           </div>
           <p className="text-xs text-surface-500 mt-0.5">
             {formatDuration(session.duration)}
             {session.targetDistance ? ` · ${session.targetDistance} km` : ""}
             {session.targetPace ? ` · ${formatPace(session.targetPace)}` : ""}
           </p>
+          {session.activity && (
+            <p className="text-xs text-success-400 mt-0.5">
+              {session.activity.movingTimeSec
+                ? formatDuration(Math.round(session.activity.movingTimeSec / 60))
+                : "—"}
+              {session.activity.avgHeartRate ? ` · ${session.activity.avgHeartRate} bpm moy.` : ""}
+              {session.activity.calories ? ` · ${session.activity.calories} kcal` : ""}
+            </p>
+          )}
         </div>
       </div>
     </button>

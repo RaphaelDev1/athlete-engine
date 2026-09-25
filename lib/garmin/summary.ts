@@ -27,7 +27,8 @@ export interface GarminSummary {
     sevenDayAvg: number | null;
     trend: { date: Date; value: number | null }[];
   };
-  sleepTrend: { date: Date; value: number | null }[];
+  sleepTrend: { date: Date; value: number | null; napMinutes: number | null }[];
+  stressTrend: { date: Date; value: number | null }[];
   bodyBattery: { value: number | null; date: Date } | null;
   trainingReadiness: {
     score: number | null;
@@ -59,6 +60,7 @@ export async function getGarminSummary(
     hrvLatest,
     hrvTrend,
     sleepTrend,
+    stressTrend,
     bodyBattery,
     trainingReadiness,
     stress,
@@ -73,6 +75,10 @@ export async function getGarminSummary(
       }),
       prisma.garminData.findMany({
         where: { userId, dataType: "SLEEP", date: { gte: since } },
+        orderBy: { date: "asc" },
+      }),
+      prisma.garminData.findMany({
+        where: { userId, dataType: "STRESS", date: { gte: since } },
         orderBy: { date: "asc" },
       }),
       latestByType(userId, "BODY_BATTERY"),
@@ -117,7 +123,16 @@ export async function getGarminSummary(
       sevenDayAvg: hrv7dAvg,
       trend: hrvTrend.map((d: GarminData) => ({ date: d.date, value: d.summaryValue })),
     },
-    sleepTrend: sleepTrend.map((d: GarminData) => ({ date: d.date, value: d.summaryValue })),
+    sleepTrend: sleepTrend.map((d: GarminData) => {
+      const napSeconds = (d.payload as { napDurationInSeconds?: number } | null)
+        ?.napDurationInSeconds;
+      return {
+        date: d.date,
+        value: d.summaryValue,
+        napMinutes: napSeconds ? Math.round(napSeconds / 60) : null,
+      };
+    }),
+    stressTrend: stressTrend.map((d: GarminData) => ({ date: d.date, value: d.summaryValue })),
     bodyBattery: bodyBattery
       ? { value: bodyBattery.summaryValue, date: bodyBattery.date }
       : null,

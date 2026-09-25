@@ -47,6 +47,7 @@ export function Sidebar({ mobileOpen = false, onCloseMobile }: SidebarProps) {
       )}
 
       <aside
+        suppressHydrationWarning
         className={`
           fixed inset-y-0 left-0 z-50 flex flex-col h-screen bg-surface-950 border-r border-surface-800
           transition-all duration-300 ease-in-out
@@ -57,12 +58,12 @@ export function Sidebar({ mobileOpen = false, onCloseMobile }: SidebarProps) {
         `}
       >
         {/* Logo */}
-        <div className="flex items-center gap-3 px-4 h-16 border-b border-surface-800">
+        <div suppressHydrationWarning className="flex items-center gap-3 px-4 h-16 border-b border-surface-800">
           <div className="flex-shrink-0 w-9 h-9 rounded-lg gradient-brand flex items-center justify-center">
             <Activity className="w-5 h-5 text-white" />
           </div>
           {!collapsed && (
-            <div className="flex flex-col min-w-0">
+            <div suppressHydrationWarning className="flex flex-col min-w-0">
               <span className="text-sm font-bold text-surface-100 truncate">
                 Athlete Engine
               </span>

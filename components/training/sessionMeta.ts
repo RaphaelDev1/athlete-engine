@@ -1,4 +1,5 @@
 import {
+  Activity as ActivityIcon,
   Bike,
   Dumbbell,
   Footprints,
@@ -31,6 +32,20 @@ export interface SessionCardData {
   status?: SessionStatus;
   actualRPE?: number | null;
   actualDuration?: number | null;
+  /** Placée manuellement par l'athlète sur le tableau — cf. app/training/page.tsx. */
+  isPinned?: boolean;
+  /**
+   * Activité réelle (Intervals.icu/Garmin) rattachée automatiquement à cette
+   * séance par date + sport — cf. app/api/training/plan/route.ts. Évite de
+   * ressaisir à la main la durée/FC/calories déjà connues du capteur.
+   */
+  activity?: {
+    name: string;
+    movingTimeSec: number | null;
+    avgHeartRate: number | null;
+    calories: number | null;
+    distanceMeters: number | null;
+  } | null;
 }
 
 export const STATUS_LABELS: Record<
@@ -51,6 +66,7 @@ export const SPORT_ICON: Record<Sport, LucideIcon> = {
   SWIMMING: Waves,
   REST: Moon,
   MOBILITY: Sparkles,
+  OTHER: ActivityIcon,
 };
 
 export const SPORT_LABEL: Record<Sport, string> = {
@@ -60,6 +76,7 @@ export const SPORT_LABEL: Record<Sport, string> = {
   SWIMMING: "Natation",
   REST: "Repos",
   MOBILITY: "Mobilité",
+  OTHER: "Autre",
 };
 
 export const SPORT_COLOR: Record<Sport, string> = {
@@ -69,6 +86,7 @@ export const SPORT_COLOR: Record<Sport, string> = {
   SWIMMING: "bg-info-500",
   REST: "bg-surface-600",
   MOBILITY: "bg-warning-500",
+  OTHER: "bg-surface-500",
 };
 
 export const DAY_LABELS = [

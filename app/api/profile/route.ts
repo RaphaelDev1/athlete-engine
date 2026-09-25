@@ -8,25 +8,31 @@ import { isImprovement, PrEvent } from "@/lib/engine/adaptation";
 import { buildPrNotifications } from "@/lib/engine/notifications";
 import { persistNotifications } from "@/lib/notifications/store";
 import {
+  CYCLING_PR_FIELDS,
   RUNNING_PR_FIELDS,
   STRENGTH_PR_FIELDS,
   SWIMMING_PR_FIELDS,
   latestRecord,
 } from "@/lib/profile/records";
 import { materializePlan } from "@/lib/training/materialize";
-import { computeWeeklyRunningVolumeKm } from "@/lib/training/volume";
+import { computeWeeklyVolumesBySport } from "@/lib/training/volume";
 
 export const dynamic = "force-dynamic";
 
-// FC repos, FC max, VO2max, allure seuil et volume hebdo course : plus jamais
+// FC repos, FC max, VO2max, allure seuil et volumes hebdo : plus jamais
 // saisis à la main, uniquement affichés (lib/garmin/profileSync.ts et
 // lib/training/volume.ts sont les seuls écrivains de ces champs en base).
+// Volumes hebdo calculés séparément par sport — course/vélo/natation ne se
+// comparent pas (unités et efforts différents), cf. demande explicite d'un
+// affichage distinct par sport sur le profil.
 export interface GarminDerivedMetrics {
   restingHR: number | null;
   maxHR: number | null;
   vo2max: number | null;
   thresholdPace: string | null;
-  weeklyVolume: number | null;
+  weeklyVolumeRunning: number | null;
+  weeklyVolumeCycling: number | null;
+  weeklyVolumeSwimming: number | null;
   garminConnected: boolean;
   lastSyncAt: string | null;
 }
@@ -35,9 +41,9 @@ async function buildGarminDerivedMetrics(
   userId: string,
   profile: AthleteProfile | null
 ): Promise<GarminDerivedMetrics> {
-  const [user, liveWeeklyVolume] = await Promise.all([
+  const [user, weeklyVolumes] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId } }),
-    computeWeeklyRunningVolumeKm(userId),
+    computeWeeklyVolumesBySport(userId),
   ]);
 
   return {
@@ -45,7 +51,15 @@ async function buildGarminDerivedMetrics(
     maxHR: profile?.maxHR ?? null,
     vo2max: profile?.vo2max ?? null,
     thresholdPace: formatSecondsToTime(profile?.thresholdPace ?? null),
-    weeklyVolume: liveWeeklyVolume ?? profile?.weeklyVolume ?? null,
+    // Jamais de repli sur profile.weeklyVolume ici : ce champ stocké ne
+    // représente que le dernier calcul fait par materializePlan (peut dater
+    // de plusieurs jours) et affichait par le passé une distance course
+    // obsolète à côté d'un volume vélo/natation, lui, toujours frais — cf.
+    // computeWeeklyVolumesBySport, seule source de vérité pour ces trois
+    // valeurs (déjà recalculée en direct ci-dessus, y compris à `null`).
+    weeklyVolumeRunning: weeklyVolumes.running,
+    weeklyVolumeCycling: weeklyVolumes.cycling,
+    weeklyVolumeSwimming: weeklyVolumes.swimming ?? profile?.weeklySwimVolume ?? null,
     garminConnected: !!user?.garminLastSyncAt,
     lastSyncAt: user?.garminLastSyncAt ? user.garminLastSyncAt.toISOString() : null,
   };
@@ -66,6 +80,7 @@ function toFormValues(
       : null,
     sex: profile.sex,
     bodyFatPct: profile.bodyFatPct,
+    weightGoalDirection: profile.weightGoalDirection,
     experienceLevel: profile.experienceLevel,
     weeklyFrequency: profile.weeklyFrequency,
     pr5k: formatSecondsToTime(pr("RUNNING", RUNNING_PR_FIELDS.pr5k)),
@@ -98,7 +113,30 @@ export async function GET() {
     return NextResponse.json({ data: null, garmin });
   }
 
-  return NextResponse.json({ data: toFormValues(profile, profile.personalRecords), garmin });
+  // Rattrapage ponctuel : la FTP existait déjà sur le profil (saisie manuelle
+  // historique) mais n'était jamais traquée comme PersonalRecord (seules les
+  // séances FITNESS_TEST et les sauvegardes de profil postérieures à ce
+  // correctif l'alimentent, cf. maybeCreatePr ci-dessous) — on crée le premier
+  // point ici plutôt que d'attendre une prochaine sauvegarde de profil.
+  let records = profile.personalRecords;
+  if (
+    profile.ftp !== null &&
+    !latestRecord(records, "CYCLING", CYCLING_PR_FIELDS.ftp)
+  ) {
+    const seeded = await prisma.personalRecord.create({
+      data: {
+        profileId: profile.id,
+        discipline: "CYCLING",
+        exercise: CYCLING_PR_FIELDS.ftp,
+        value: profile.ftp,
+        unit: "watts",
+        achievedAt: profile.updatedAt,
+      },
+    });
+    records = [...records, seeded];
+  }
+
+  return NextResponse.json({ data: toFormValues(profile, records), garmin });
 }
 
 export async function PUT(request: Request) {
@@ -124,6 +162,7 @@ export async function PUT(request: Request) {
         dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : null,
         sex: data.sex,
         bodyFatPct: data.bodyFatPct,
+        weightGoalDirection: data.weightGoalDirection,
         experienceLevel: data.experienceLevel,
         weeklyFrequency: data.weeklyFrequency,
         ftp: data.ftp,
@@ -139,6 +178,7 @@ export async function PUT(request: Request) {
         dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : null,
         sex: data.sex,
         bodyFatPct: data.bodyFatPct,
+        weightGoalDirection: data.weightGoalDirection,
         experienceLevel: data.experienceLevel,
         weeklyFrequency: data.weeklyFrequency,
         ftp: data.ftp,
@@ -205,6 +245,10 @@ export async function PUT(request: Request) {
       parseTimeToSeconds(data.pr400mSwim),
       "seconds"
     );
+    // FTP est aussi mis à jour depuis les séances FITNESS_TEST (cf.
+    // lib/profile/records.ts::TEST_RESULT_FIELDS.ftp, même discipline/exercice)
+    // — les deux sources alimentent la même série de PR vélo.
+    await maybeCreatePr("CYCLING", CYCLING_PR_FIELDS.ftp, data.ftp, "watts");
 
     if (prEvents.length > 0) {
       await persistNotifications(user.id, buildPrNotifications(prEvents));

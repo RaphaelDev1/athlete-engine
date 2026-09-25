@@ -17,6 +17,8 @@ import { getOrCreateSchedule } from "@/lib/training/schedule";
 import { isIntervalsConfigured } from "@/lib/intervals/config";
 import { isGarminConfigured } from "@/lib/garmin/client";
 import { latestRecord, SWIMMING_PR_FIELDS } from "@/lib/profile/records";
+import { categorizeSport } from "@/lib/training/sportCategory";
+import { Sport } from "@/lib/types";
 import {
   predict5kFromVdot,
   predictSwim750m,
@@ -95,6 +97,62 @@ function summarizeActivitiesBySport(
   });
 }
 
+// Catégories affichées dans "Activités récentes" — plus fines que
+// SportCategory (lib/training/sportCategory.ts), qui regroupe course/vélo/
+// natation sous un même "ENDURANCE" : ici on les sépare pour le volume
+// hebdo/l'historique par sport demandés sur le dashboard.
+type DashboardActivityCategory =
+  | "RUNNING"
+  | "CYCLING"
+  | "SWIMMING"
+  | "RACQUET"
+  | "STRENGTH"
+  | "OUTDOOR"
+  | "OTHER";
+
+const DASHBOARD_CATEGORY_LABELS: Record<DashboardActivityCategory, string> = {
+  RUNNING: "Course",
+  CYCLING: "Vélo",
+  SWIMMING: "Natation",
+  RACQUET: "Sports de raquette",
+  STRENGTH: "Musculation",
+  OUTDOOR: "Plein air",
+  OTHER: "Autre",
+};
+
+// Toujours affichées même sans activité récente (demandées explicitement) ;
+// les autres catégories n'apparaissent que si elles ont au moins une activité.
+const DASHBOARD_CATEGORY_ALWAYS_SHOWN: DashboardActivityCategory[] = [
+  "RUNNING",
+  "CYCLING",
+  "SWIMMING",
+  "RACQUET",
+];
+
+function dashboardActivityCategory(sport: string, name?: string | null): DashboardActivityCategory {
+  if (sport === "RUNNING" || sport === "CYCLING" || sport === "SWIMMING" || sport === "STRENGTH") {
+    return sport;
+  }
+  const category = categorizeSport(sport as Sport, name);
+  if (category === "RACQUET" || category === "OUTDOOR") return category;
+  return "OTHER";
+}
+
+interface RecentActivity {
+  id: string;
+  sport: string;
+  name: string | null;
+  startDate: Date;
+  distanceMeters: number | null;
+  movingTimeSec: number | null;
+  avgPaceSecPerKm: number | null;
+  avgSpeedKph: number | null;
+  avgHeartRate: number | null;
+  avgPower: number | null;
+  elevationGain: number | null;
+  calories: number | null;
+}
+
 function groupByExercise(
   records: { exercise: string; achievedAt: Date | null; createdAt: Date; value: number }[]
 ): Map<string, { achievedAt: Date; value: number }[]> {
@@ -158,6 +216,7 @@ export async function GET() {
     todaySessions,
     nextSession,
     weekActivities,
+    recentActivitiesRaw,
   ] = await Promise.all([
     prisma.weightLog.findMany({
       where: { userId: user.id, date: { gte: new Date(Date.now() - 90 * 86400000) } },
@@ -221,6 +280,25 @@ export async function GET() {
       where: { userId: user.id, startDate: { gte: weekStart, lt: weekEnd } },
       select: { sport: true, movingTimeSec: true, distanceMeters: true },
     }),
+    prisma.activity.findMany({
+      where: { userId: user.id },
+      orderBy: { startDate: "desc" },
+      take: 300,
+      select: {
+        id: true,
+        sport: true,
+        name: true,
+        startDate: true,
+        distanceMeters: true,
+        movingTimeSec: true,
+        avgPaceSecPerKm: true,
+        avgSpeedKph: true,
+        avgHeartRate: true,
+        avgPower: true,
+        elevationGain: true,
+        calories: true,
+      },
+    }),
   ]);
 
   const trainingLoad = computeTrainingLoad(
@@ -253,6 +331,8 @@ export async function GET() {
           soreness: checkInToday.soreness,
           motivation: checkInToday.motivation,
           stress: checkInToday.stress,
+          sleepQuality: checkInToday.sleepQuality,
+          napTaken: checkInToday.napTaken,
         }
       : null,
     trainingLoad.ratio
@@ -332,6 +412,36 @@ export async function GET() {
     strength: strengthProjections,
   };
 
+  const recentActivities: RecentActivity[] = recentActivitiesRaw as RecentActivity[];
+
+  const activitiesByCategory = new Map<DashboardActivityCategory, RecentActivity[]>();
+  for (const activity of recentActivities) {
+    const category = dashboardActivityCategory(activity.sport, activity.name);
+    const list = activitiesByCategory.get(category) ?? [];
+    if (list.length < 5) list.push(activity);
+    activitiesByCategory.set(category, list);
+  }
+  const categoryOrder: DashboardActivityCategory[] = [
+    "RUNNING",
+    "CYCLING",
+    "SWIMMING",
+    "RACQUET",
+    "STRENGTH",
+    "OUTDOOR",
+    "OTHER",
+  ];
+  const recentActivitiesByCategory = categoryOrder
+    .filter(
+      (category) =>
+        DASHBOARD_CATEGORY_ALWAYS_SHOWN.includes(category) ||
+        (activitiesByCategory.get(category)?.length ?? 0) > 0
+    )
+    .map((category) => ({
+      category,
+      label: DASHBOARD_CATEGORY_LABELS[category],
+      activities: activitiesByCategory.get(category) ?? [],
+    }));
+
   return NextResponse.json({
     profile: profile
       ? {
@@ -361,6 +471,13 @@ export async function GET() {
     recentSessions,
     lastWeightLogDate,
     activitiesThisWeek: summarizeActivitiesBySport(weekActivities),
+    recentActivities: recentActivities.slice(0, 5),
+    // Tableau complet pour la carte "Séances de la semaine" — contrairement à
+    // activitiesThisWeek (agrégat, vide sans activité cette semaine),
+    // toujours peuplé dès qu'il existe un historique, avec un filtre par
+    // sport côté client (cf. components/dashboard/DashboardContent.tsx).
+    recentActivitiesTable: recentActivities.slice(0, 25),
+    recentActivitiesByCategory,
     intervals: {
       configured: isIntervalsConfigured(),
       lastSyncAt: user.intervalsLastSyncAt,

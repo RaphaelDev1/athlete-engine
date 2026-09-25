@@ -13,10 +13,5 @@ export async function fetchActivities(oldest: Date, newest: Date): Promise<Norma
     { oldest: toDateString(oldest), newest: toDateString(newest) }
   );
 
-  const normalized: NormalizedActivity[] = [];
-  for (const item of raw) {
-    const activity = normalizeActivity(item);
-    if (activity) normalized.push(activity);
-  }
-  return normalized;
+  return raw.map(normalizeActivity);
 }

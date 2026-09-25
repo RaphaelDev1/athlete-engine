@@ -6,7 +6,10 @@
 // - Un seul TrainingPlan actif par utilisateur.
 // - Invariant central : une TrainingWeek qui contient une séance dont le
 //   statut n'est plus PLANNED (COMPLETED/PARTIAL/SKIPPED/RESCHEDULED) n'est
-//   plus jamais réécrite — l'historique réel est immuable.
+//   plus jamais réécrite — l'historique réel est immuable. Une séance placée
+//   manuellement par l'athlète (isPinned, cf. app/api/training/sessions/[id]/
+//   place/route.ts) gèle sa semaine de la même façon — le placement manuel ne
+//   doit jamais être silencieusement écrasé par la prochaine régénération.
 // - Une semaine encore 100% PLANNED est régénérée seulement si son contenu a
 //   changé (comparaison par signature) pour ne pas faire tourner des id de
 //   séance à chaque appel.
@@ -192,6 +195,7 @@ async function rescheduleMissedSessions(userId: string): Promise<void> {
     where: {
       week: { planId: plan.id },
       status: "PLANNED",
+      isPinned: false, // placement manuel — jamais déplacé automatiquement
       sport: { not: "REST" },
       scheduledDate: { lt: today },
     },
@@ -261,14 +265,16 @@ export async function materializePlan(userId: string) {
   // Volume hebdo course = donnée réelle (activités synchronisées), jamais
   // saisie à la main — recalculé à chaque appel, c'est une agrégation locale
   // bon marché (pas d'appel Garmin), donc toujours à jour sans job séparé.
+  // Écrit aussi `null` quand aucune course récente n'existe : sauter la mise à
+  // jour dans ce cas laissait une ancienne valeur figée en base, affichée à
+  // tort comme volume hebdo course actuel (cf. weeklyVolumeRunning côté
+  // app/api/profile/route.ts, qui ne devait plus s'y fier).
   const weeklyVolumeKm = await computeWeeklyRunningVolumeKm(userId);
-  if (weeklyVolumeKm !== null) {
-    await prisma.athleteProfile.upsert({
-      where: { userId },
-      update: { weeklyVolume: weeklyVolumeKm },
-      create: { userId, weeklyVolume: weeklyVolumeKm },
-    });
-  }
+  await prisma.athleteProfile.upsert({
+    where: { userId },
+    update: { weeklyVolume: weeklyVolumeKm },
+    create: { userId, weeklyVolume: weeklyVolumeKm },
+  });
 
   const profileRow = await prisma.athleteProfile.findUnique({
     where: { userId },
@@ -374,6 +380,7 @@ export async function materializePlan(userId: string) {
         select: {
           id: true,
           status: true,
+          isPinned: true,
           scheduledDate: true,
           sport: true,
           sessionType: true,
@@ -404,8 +411,8 @@ export async function materializePlan(userId: string) {
       continue;
     }
 
-    const hasHistory = existing.sessions.some((s) => s.status !== "PLANNED");
-    if (hasHistory) continue; // séance déjà loggée cette semaine — on ne touche plus rien
+    const isLocked = existing.sessions.some((s) => s.status !== "PLANNED" || s.isPinned);
+    if (isLocked) continue; // séance déjà loggée ou placée manuellement cette semaine — on ne touche plus rien
 
     const currentSignature = weekSignature(existing.sessions);
     const nextSignature = weekSignature(

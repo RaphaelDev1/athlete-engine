@@ -4,8 +4,11 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, History as HistoryIcon, RefreshCw } from "lucide-react";
 import { Card, CardHeader, CardTitle, Badge, Select, Input, EmptyState, Button } from "@/components/ui";
 import { SPORT_LABEL, STATUS_LABELS, formatDuration } from "@/components/training/sessionMeta";
-import { formatSecondsToTime } from "@/lib/utils/time";
 import { HistoryDay, HistoryDayActivity, HistoryDaySession } from "@/app/api/history/route";
+import { ActivityEditModal } from "@/components/history/ActivityEditModal";
+import { ActivityListItem } from "@/components/history/ActivityListItem";
+import { ActivityEditFormValues } from "@/lib/validations/activity";
+import { activityLabel, byCategory } from "@/lib/training/activityDisplay";
 
 interface IntervalsStatus {
   configured: boolean;
@@ -14,21 +17,13 @@ interface IntervalsStatus {
   lastSyncError: string | null;
 }
 
-function formatActivityPace(a: HistoryDayActivity): string {
-  if (a.sport === "SWIMMING" && a.avgPaceSecPerKm) {
-    return `${formatSecondsToTime(a.avgPaceSecPerKm / 10)} /100m`;
-  }
-  if (a.avgPaceSecPerKm) return `${formatSecondsToTime(a.avgPaceSecPerKm)} /km`;
-  if (a.avgSpeedKph) return `${a.avgSpeedKph.toFixed(1)} km/h`;
-  return "—";
-}
-
 const SPORT_FILTER_OPTIONS = [
   { value: "", label: "Tous les sports" },
   { value: "RUNNING", label: "Course" },
   { value: "CYCLING", label: "Vélo" },
   { value: "SWIMMING", label: "Natation" },
   { value: "STRENGTH", label: "Musculation" },
+  { value: "OTHER", label: "Autre" },
 ];
 
 function toInputDate(dateKey: string): string {
@@ -70,6 +65,7 @@ export default function HistoryPage() {
   // app/api/intervals/sync/route.ts), mais l'athlète peut reculer cette date
   // pour rapatrier des mois plus anciens (ex. reprise après une longue coupure).
   const [syncSince, setSyncSince] = useState<string>(defaultSyncSince());
+  const [editingActivity, setEditingActivity] = useState<HistoryDayActivity | null>(null);
 
   async function load(params?: { from?: string; to?: string; sport?: string }) {
     setLoading(true);
@@ -105,6 +101,19 @@ export default function HistoryPage() {
     }
     await Promise.all([load({ from, to, sport }), loadIntervalsStatus()]);
     setSyncing(false);
+  }
+
+  async function handleSaveActivity(id: string, data: ActivityEditFormValues) {
+    const res = await fetch(`/api/activities/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error ?? "La mise à jour a échoué.");
+    }
+    await load({ from, to, sport });
   }
 
   function applyFilters(nextFrom: string, nextTo: string, nextSport: string) {
@@ -255,7 +264,7 @@ export default function HistoryPage() {
                             {day.sessions.length === 0 ? (
                               <span className="text-surface-600">—</span>
                             ) : (
-                              day.sessions.map((s) => (
+                              byCategory(day.sessions).map((s) => (
                                 <Badge key={s.id} variant={STATUS_LABELS[s.status]?.variant ?? "default"}>
                                   {SPORT_LABEL[s.sport as keyof typeof SPORT_LABEL] ?? s.sport}
                                 </Badge>
@@ -268,9 +277,9 @@ export default function HistoryPage() {
                             {day.activities.length === 0 ? (
                               <span className="text-surface-600">—</span>
                             ) : (
-                              day.activities.map((a) => (
+                              byCategory(day.activities).map((a) => (
                                 <Badge key={a.id} variant="success">
-                                  {SPORT_LABEL[a.sport as keyof typeof SPORT_LABEL] ?? a.sport}
+                                  {activityLabel(a.sport, a.name)}
                                 </Badge>
                               ))
                             )}
@@ -298,7 +307,7 @@ export default function HistoryPage() {
                         <tr className="bg-surface-850/50">
                           <td />
                           <td colSpan={8} className="py-3 pr-3">
-                            <DayDetail day={day} />
+                            <DayDetail day={day} onEditActivity={setEditingActivity} />
                           </td>
                         </tr>
                       )}
@@ -310,54 +319,78 @@ export default function HistoryPage() {
           </div>
         )}
       </Card>
+
+      <ActivityEditModal
+        activity={editingActivity}
+        onClose={() => setEditingActivity(null)}
+        onSave={handleSaveActivity}
+      />
     </div>
   );
 }
 
-function DayDetail({ day }: { day: HistoryDay }) {
+function DayDetail({
+  day,
+  onEditActivity,
+}: {
+  day: HistoryDay;
+  onEditActivity: (activity: HistoryDayActivity) => void;
+}) {
   return (
     <div className="space-y-3">
       {day.sessions.length > 0 && (
         <div className="space-y-1.5">
-          {day.sessions.map((s: HistoryDaySession) => (
-            <div
-              key={s.id}
-              className="flex items-center justify-between gap-3 text-xs bg-surface-900 rounded-lg px-3 py-2 border border-surface-800"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <Badge variant={STATUS_LABELS[s.status]?.variant ?? "default"}>
-                  {STATUS_LABELS[s.status]?.label ?? s.status}
-                </Badge>
-                <span className="text-surface-200 truncate">{s.title}</span>
+          {byCategory(day.sessions).map((s: HistoryDaySession) => {
+            const loggedExercises = s.exercises.filter(
+              (e) => e.actualSets !== null || e.actualReps !== null || e.actualWeight !== null
+            );
+            return (
+              <div
+                key={s.id}
+                className="text-xs bg-surface-900 rounded-lg px-3 py-2 border border-surface-800"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Badge variant={STATUS_LABELS[s.status]?.variant ?? "default"}>
+                      {STATUS_LABELS[s.status]?.label ?? s.status}
+                    </Badge>
+                    <span className="text-surface-200 truncate">{s.title}</span>
+                  </div>
+                  <div className="text-surface-500 whitespace-nowrap">
+                    {formatDuration(s.actualDuration ?? s.duration)}
+                    {s.duration && s.actualDuration && s.actualDuration !== s.duration
+                      ? ` (prévu ${formatDuration(s.duration)})`
+                      : ""}
+                    {s.actualRPE !== null
+                      ? ` · RPE ${s.actualRPE}`
+                      : s.targetRPE
+                      ? ` · RPE prévu ${s.targetRPE}`
+                      : ""}
+                  </div>
+                </div>
+                {loggedExercises.length > 0 && (
+                  <ul className="mt-1.5 pl-1 space-y-0.5">
+                    {loggedExercises.map((e, i) => (
+                      <li key={i} className="text-surface-400 flex justify-between gap-3">
+                        <span className="truncate">{e.name}</span>
+                        <span className="text-surface-500 whitespace-nowrap">
+                          {e.actualSets ?? e.sets ?? "—"} × {e.actualReps ?? e.reps ?? "—"}
+                          {e.actualWeight ? ` · ${e.actualWeight} kg` : ""}
+                          {e.actualRPE ? ` · RPE ${e.actualRPE}` : ""}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              <div className="text-surface-500 whitespace-nowrap">
-                {formatDuration(s.actualDuration ?? s.duration)}
-                {s.duration && s.actualDuration && s.actualDuration !== s.duration
-                  ? ` (prévu ${formatDuration(s.duration)})`
-                  : ""}
-                {s.actualRPE !== null ? ` · RPE ${s.actualRPE}` : s.targetRPE ? ` · RPE prévu ${s.targetRPE}` : ""}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
       {day.activities.length > 0 && (
         <div className="space-y-1.5">
-          {day.activities.map((a) => (
-            <div
-              key={a.id}
-              className="flex items-center justify-between gap-3 text-xs bg-surface-900 rounded-lg px-3 py-2 border border-surface-800"
-            >
-              <div className="flex items-center gap-2 min-w-0">
-                <Badge variant="success">{SPORT_LABEL[a.sport as keyof typeof SPORT_LABEL] ?? a.sport}</Badge>
-                <span className="text-surface-200 truncate">{a.name}</span>
-              </div>
-              <div className="text-surface-500 whitespace-nowrap">
-                {a.distanceMeters ? `${(a.distanceMeters / 1000).toFixed(1)} km` : "—"}
-                {a.movingTimeSec ? ` · ${formatDuration(Math.round(a.movingTimeSec / 60))}` : ""}
-                {a.avgPaceSecPerKm || a.avgSpeedKph ? ` · ${formatActivityPace(a)}` : ""}
-              </div>
-            </div>
+          {byCategory(day.activities).map((a) => (
+            <ActivityListItem key={a.id} activity={a} onEdit={onEditActivity} />
           ))}
         </div>
       )}
